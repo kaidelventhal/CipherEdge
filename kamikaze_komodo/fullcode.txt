@@ -1,0 +1,2411 @@
+app_logger.py:
+<code>
+# kamikaze_komodo/app_logger.py
+import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+LOG_DIR = "logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
+log_file_path = os.path.join(LOG_DIR, "kamikaze_komodo.log")
+
+# Configure logging
+logger = logging.getLogger("KamikazeKomodo")
+logger.setLevel(logging.DEBUG)  # Set to DEBUG to capture all levels of messages
+
+# Create handlers
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)  # Console logs info and above
+
+file_handler = RotatingFileHandler(
+    log_file_path, maxBytes=10*1024*1024, backupCount=5  # 10MB per file, 5 backups
+)
+file_handler.setLevel(logging.DEBUG)  # File logs debug and above
+
+# Create formatters and add it to handlers
+log_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(module)s.%(funcName)s - %(message)s')
+console_handler.setFormatter(log_format)
+file_handler.setFormatter(log_format)
+
+# Add handlers to the logger
+if not logger.handlers:
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+
+def get_logger(module_name: str) -> logging.Logger:
+    """
+    Returns a logger instance for a specific module.
+    """
+    return logging.getLogger(f"KamikazeKomodo.{module_name}")
+</code>
+
+main.py:
+<code>
+# kamikaze_komodo/main.py
+import asyncio
+from kamikaze_komodo.app_logger import get_logger, logger as root_logger # Use root logger for main app messages
+from kamikaze_komodo.config.settings import settings
+from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
+from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+from kamikaze_komodo.exchange_interaction.exchange_api import ExchangeAPI
+
+# --- Import Phase 2 components ---
+from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager
+from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
+from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
+from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
+from kamikaze_komodo.core.models import BarData # For type hinting or example data
+from datetime import datetime, timedelta, timezone
+import pandas as pd
+
+
+logger = get_logger(__name__) # Module-specific logger
+
+async def run_phase1_demonstration():
+    """Demonstrates Phase 1 components."""
+    root_logger.info("Starting Kamikaze Komodo Quantitative Trading Program - Phase 1 Demonstration")
+    if not settings:
+        root_logger.critical("Settings failed to load. Application cannot continue.")
+        return
+
+    root_logger.info(f"Log Level: {settings.log_level}")
+    root_logger.info(f"Default Symbol: {settings.default_symbol}")
+
+    # Initialize Database Manager
+    db_manager = DatabaseManager()
+
+    # Initialize Data Fetcher
+    data_fetcher = DataFetcher(exchange_id='kraken') # Default to Kraken as per plan
+    
+    # Fetch some historical data
+    symbol = settings.default_symbol
+    timeframe = settings.default_timeframe
+    # Fetch a small amount of recent data for demonstration
+    # For a proper run, fetch_historical_data_for_period would be better.
+    # since_date = datetime.now(timezone.utc) - timedelta(days=10)
+    # historical_data = await data_fetcher.fetch_historical_ohlcv(symbol, timeframe, since=since_date, limit=100)
+    
+    start_period = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days else 60)
+    end_period = datetime.now(timezone.utc)
+    
+    historical_data = await data_fetcher.fetch_historical_data_for_period(
+        symbol, timeframe, start_period, end_period
+    )
+
+    if historical_data:
+        logger.info(f"Fetched {len(historical_data)} data points for {symbol} ({timeframe}).")
+        # Store data
+        db_manager.store_bar_data(historical_data)
+        # Retrieve data (example)
+        retrieved_data = db_manager.retrieve_bar_data(symbol, timeframe, start_date=start_period)
+        logger.info(f"Retrieved {len(retrieved_data)} data points from DB for {symbol} ({timeframe}).")
+    else:
+        logger.warning(f"No historical data fetched for {symbol}.")
+
+    await data_fetcher.close()
+
+    # Initialize Exchange API
+    exchange_api = ExchangeAPI(exchange_id='kraken')
+    balance = await exchange_api.fetch_balance() # Will show warning if API keys are dummy
+    if balance:
+        # logger.info(f"Account Balance: {balance.get('total', {})}") # Structure varies
+        logger.info(f"Fetched balance. Free USD: {balance.get('USD', {}).get('free', 'N/A')}")
+    else:
+        logger.warning("Could not fetch account balance (may be due to dummy API keys or network issues).")
+    
+    await exchange_api.close()
+    db_manager.close()
+    root_logger.info("Phase 1 Demonstration completed.")
+
+
+async def run_phase2_demonstration():
+    """Demonstrates Phase 2 components: Basic Strategy & Backtesting."""
+    root_logger.info("Starting Kamikaze Komodo Quantitative Trading Program - Phase 2 Demonstration")
+    if not settings:
+        root_logger.critical("Settings failed to load. Application cannot continue.")
+        return
+
+    # 1. Get Data (either from DB or fetch fresh)
+    db_manager = DatabaseManager()
+    data_fetcher = DataFetcher()
+
+    symbol = settings.default_symbol
+    timeframe = settings.default_timeframe
+    start_date = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days > 0 else 365) # Ensure positive days
+    end_date = datetime.now(timezone.utc)
+
+    # Try to retrieve from DB first
+    historical_bars: List[BarData] = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+
+    if not historical_bars or len(historical_bars) < (settings.ewmac_long_window + 5): # Need enough data for EMA + a bit more
+        logger.info(f"Not enough data in DB or data is old for {symbol} ({timeframe}). Fetching fresh data...")
+        historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
+        if historical_bars:
+            db_manager.store_bar_data(historical_bars) # Store newly fetched data
+        else:
+            logger.error(f"Failed to fetch sufficient historical data for {symbol} ({timeframe}). Cannot proceed with backtest.")
+            await data_fetcher.close()
+            db_manager.close()
+            return
+    
+    await data_fetcher.close() # Close fetcher connection after use
+    db_manager.close() # Close DB connection after use
+
+    if not historical_bars:
+        logger.error(f"No historical data available for {symbol} to run backtest.")
+        return
+    
+    logger.info(f"Using {len(historical_bars)} bars of historical data for backtesting {symbol} ({timeframe}).")
+
+    # Convert BarData list to Pandas DataFrame for strategy processing
+    # The strategy will expect a DataFrame.
+    data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
+    data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
+    data_df.set_index('timestamp', inplace=True)
+    
+    if data_df.empty or len(data_df) < max(settings.ewmac_short_window, settings.ewmac_long_window):
+        logger.error(f"Not enough data points ({len(data_df)}) after DataFrame conversion for EWMAC strategy. Need at least {max(settings.ewmac_short_window, settings.ewmac_long_window)}.")
+        return
+
+    # 2. Initialize Strategy
+    ewmac_params = {
+        'short_window': settings.ewmac_short_window,
+        'long_window': settings.ewmac_long_window,
+        # 'signal_window': settings.config.getint('EWMAC_Strategy', 'SignalWindow') # if using MACD
+    }
+    ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
+
+    # 3. Initialize Strategy Manager (Optional for single strategy backtest, but good for structure)
+    strategy_manager = StrategyManager()
+    strategy_manager.add_strategy(ewmac_strategy)
+
+    # 4. Initialize Backtesting Engine
+    # For this basic backtest, we'll pass data and strategy directly.
+    # A more advanced engine would take data from a source and manage strategy execution.
+    initial_capital = 10000.00 # Example starting capital
+    commission_bps = 0.001 # Example commission 0.1% (10 bps)
+    
+    backtest_engine = BacktestingEngine(
+        data_feed_df=data_df, # Engine expects DataFrame
+        strategy=ewmac_strategy, # Pass the single strategy instance
+        initial_capital=initial_capital,
+        commission_bps=commission_bps
+    )
+    
+    # 5. Run Backtest
+    logger.info(f"Running backtest for EWMAC strategy on {symbol}...")
+    trades_log, final_portfolio = backtest_engine.run()
+
+    # 6. Analyze Performance
+    if trades_log:
+        logger.info(f"Backtest completed. Generated {len(trades_log)} trades.")
+        performance_analyzer = PerformanceAnalyzer(
+            trades=trades_log, 
+            initial_capital=initial_capital,
+            final_capital=final_portfolio['total_value'] # Access total_value from portfolio dict
+            )
+        
+        metrics = performance_analyzer.calculate_metrics()
+        performance_analyzer.print_summary(metrics)
+        
+        # Store PnL series for plotting or further analysis if needed
+        # pnl_series = performance_analyzer.get_pnl_series()
+        # equity_curve = performance_analyzer.get_equity_curve()
+        # logger.debug(f"Equity Curve (first 5): \n{equity_curve.head()}")
+    else:
+        logger.info("Backtest completed. No trades were executed.")
+        logger.info(f"Final portfolio value: ${final_portfolio['total_value']:.2f}")
+
+
+    root_logger.info("Phase 2 Demonstration completed.")
+
+
+async def main():
+    """
+    Main asynchronous function to run the application phases.
+    """
+    # Uncomment the phase you want to demonstrate
+    # await run_phase1_demonstration()
+    await run_phase2_demonstration()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        root_logger.info("Kamikaze Komodo program terminated by user.")
+    except Exception as e:
+        root_logger.critical(f"Critical error in main execution: {e}", exc_info=True)
+</code>
+
+__init__.py:
+<code>
+# kamikaze_komodo/__init__.py
+# This file makes the 'root' directory a Python package.
+</code>
+
+backtesting_engine/engine.py:
+<code>
+# kamikaze_komodo/backtesting_engine/engine.py
+import pandas as pd
+from typing import List, Dict, Any, Optional
+from kamikaze_komodo.core.models import BarData, Trade, Order # Order might not be fully used in basic backtest
+from kamikaze_komodo.core.enums import SignalType, OrderSide, TradeResult
+from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
+from kamikaze_komodo.app_logger import get_logger
+from datetime import datetime, timezone
+
+logger = get_logger(__name__)
+
+class BacktestingEngine:
+    """
+    A basic backtesting engine.
+    Iterates through historical data, applies strategy logic, and simulates trades.
+    """
+    def __init__(
+        self,
+        data_feed_df: pd.DataFrame, # Expects DataFrame with OHLCV columns, indexed by timestamp
+        strategy: BaseStrategy,
+        initial_capital: float = 10000.0,
+        commission_bps: float = 0.0, # Commission in basis points (e.g., 10 bps = 0.1% = 0.001)
+        stop_loss_pct: Optional[float] = None, # e.g., 0.02 for 2%
+        take_profit_pct: Optional[float] = None # e.g., 0.05 for 5%
+    ):
+        if data_feed_df.empty:
+            raise ValueError("Data feed DataFrame cannot be empty.")
+        if not isinstance(data_feed_df.index, pd.DatetimeIndex):
+            raise ValueError("Data feed DataFrame must be indexed by timestamp (pd.DatetimeIndex).")
+        
+        self.data_feed_df = data_feed_df.sort_index() # Ensure data is chronological
+        self.strategy = strategy
+        self.initial_capital = initial_capital
+        self.commission_rate = commission_bps / 10000.0 # Convert bps to a rate (e.g., 10bps -> 0.001)
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+
+        self.portfolio_history: List[Dict[str, Any]] = []
+        self.trades_log: List[Trade] = []
+        
+        self.current_capital = initial_capital
+        self.current_position_size = 0.0 # In units of the asset
+        self.current_position_side: Optional[OrderSide] = None
+        self.entry_price: Optional[float] = None
+        self.trade_id_counter = 0
+
+        logger.info(
+            f"BacktestingEngine initialized for strategy '{strategy.name}' on symbol '{strategy.symbol}'. "
+            f"Initial Capital: ${initial_capital:,.2f}, Commission: {commission_bps} bps."
+        )
+        if stop_loss_pct: logger.info(f"Stop Loss: {stop_loss_pct*100:.2f}%")
+        if take_profit_pct: logger.info(f"Take Profit: {take_profit_pct*100:.2f}%")
+
+
+    def _get_next_trade_id(self) -> str:
+        self.trade_id_counter += 1
+        return f"trade_{self.trade_id_counter:05d}"
+
+    def _execute_trade(
+        self, 
+        signal_type: SignalType, 
+        timestamp: datetime, 
+        price: float # Execution price (e.g., current bar's close or next bar's open)
+    ):
+        """Simulates executing a trade based on the signal."""
+        commission_cost = 0.0
+
+        # --- POSITION ENTRY ---
+        if signal_type == SignalType.LONG and self.current_position_side is None:
+            # Simple position sizing: use all available capital (for this basic engine)
+            # A more advanced engine would use a PositionSizer module.
+            if self.current_capital <= 0:
+                logger.warning(f"{timestamp} - Cannot enter LONG trade for {self.strategy.symbol}. No capital available.")
+                return
+
+            self.current_position_size = self.current_capital / price
+            commission_cost = self.current_position_size * price * self.commission_rate
+            self.current_capital -= commission_cost # Deduct commission
+            
+            self.current_position_side = OrderSide.BUY
+            self.entry_price = price
+            
+            # Create a new trade record (still open)
+            trade = Trade(
+                id=self._get_next_trade_id(),
+                symbol=self.strategy.symbol,
+                entry_order_id=f"entry_{self.trade_id_counter}", # Simulated order ID
+                side=OrderSide.BUY,
+                entry_price=self.entry_price,
+                amount=self.current_position_size,
+                entry_timestamp=timestamp,
+                commission=commission_cost # Initial commission for entry
+            )
+            self.trades_log.append(trade)
+            logger.info(
+                f"{timestamp} - EXECUTE LONG: {self.current_position_size:.4f} {self.strategy.symbol} "
+                f"@ ${price:.2f}. Capital: ${self.current_capital:.2f}. Comm: ${commission_cost:.2f}."
+            )
+
+        # --- POSITION EXIT ---
+        elif signal_type == SignalType.CLOSE_LONG and self.current_position_side == OrderSide.BUY:
+            if self.current_position_size == 0 or self.entry_price is None:
+                logger.warning(f"{timestamp} - Received CLOSE_LONG but no open BUY position or entry price for {self.strategy.symbol}.")
+                return
+
+            exit_value = self.current_position_size * price
+            commission_cost = exit_value * self.commission_rate
+            
+            pnl = (price - self.entry_price) * self.current_position_size - commission_cost # Commission already paid on entry, add exit commission here
+            pnl_percentage = ((price / self.entry_price) - 1) if self.entry_price > 0 else 0.0
+            pnl_percentage -= (self.commission_rate * 2) # Approx for round trip
+
+            self.current_capital += exit_value - commission_cost # Add proceeds, deduct exit commission
+            
+            # Update the last trade log
+            if self.trades_log:
+                last_trade = self.trades_log[-1]
+                if last_trade.exit_price is None: # Ensure it's the correct open trade
+                    last_trade.exit_price = price
+                    last_trade.exit_timestamp = timestamp
+                    last_trade.pnl = pnl
+                    last_trade.pnl_percentage = pnl_percentage
+                    last_trade.commission += commission_cost # Add exit commission
+                    last_trade.result = TradeResult.WIN if pnl > 0 else (TradeResult.LOSS if pnl < 0 else TradeResult.BREAKEVEN)
+                    last_trade.exit_order_id = f"exit_{last_trade.id.split('_')[1]}"
+
+            logger.info(
+                f"{timestamp} - EXECUTE CLOSE LONG: {self.current_position_size:.4f} {self.strategy.symbol} "
+                f"@ ${price:.2f}. PnL: ${pnl:.2f} ({pnl_percentage*100:.2f}%). "
+                f"Capital: ${self.current_capital:.2f}. Comm: ${commission_cost:.2f}."
+            )
+
+            # Reset position
+            self.current_position_size = 0.0
+            self.current_position_side = None
+            self.entry_price = None
+        
+        # Note: This basic engine doesn't handle SHORT signals or CLOSE_SHORT.
+        elif signal_type == SignalType.SHORT or signal_type == SignalType.CLOSE_SHORT:
+            logger.debug(f"{timestamp} - SHORT/CLOSE_SHORT signals are not handled by this basic backtesting engine.")
+
+
+    def _check_stop_loss_take_profit(self, current_bar: BarData):
+        """Checks and triggers SL/TP if conditions are met within the current bar's H/L prices."""
+        if self.current_position_side == OrderSide.BUY and self.entry_price is not None:
+            # Check Stop Loss
+            if self.stop_loss_pct:
+                stop_loss_price = self.entry_price * (1 - self.stop_loss_pct)
+                if current_bar.low <= stop_loss_price:
+                    logger.info(f"{current_bar.timestamp} - STOP LOSS triggered for {self.strategy.symbol} at ${stop_loss_price:.2f} (Low: {current_bar.low:.2f})")
+                    self._execute_trade(SignalType.CLOSE_LONG, current_bar.timestamp, stop_loss_price)
+                    return True # SL Triggered
+
+            # Check Take Profit (only if not SL triggered)
+            if self.take_profit_pct and self.current_position_side == OrderSide.BUY: # Check side again in case SL closed it
+                take_profit_price = self.entry_price * (1 + self.take_profit_pct)
+                if current_bar.high >= take_profit_price:
+                    logger.info(f"{current_bar.timestamp} - TAKE PROFIT triggered for {self.strategy.symbol} at ${take_profit_price:.2f} (High: {current_bar.high:.2f})")
+                    self._execute_trade(SignalType.CLOSE_LONG, current_bar.timestamp, take_profit_price)
+                    return True # TP Triggered
+        return False # No SL/TP triggered
+
+
+    def run(self) -> tuple[List[Trade], Dict[str, Any]]:
+        """
+        Runs the backtest simulation.
+
+        Returns:
+            A tuple containing:
+            - List[Trade]: The log of all executed trades.
+            - Dict[str, Any]: The final portfolio state.
+        """
+        logger.info(f"Starting backtest run for strategy '{self.strategy.name}'...")
+
+        # Option 1: Generate all signals first (less realistic for on_bar_data logic, good for vectorized)
+        # signals = self.strategy.generate_signals(self.data_feed_df)
+
+        # Option 2: Iterate bar by bar, calling strategy.on_bar_data (more realistic for event-driven)
+        # We will use Option 2 as it aligns better with how on_bar_data is defined.
+        # The strategy needs to maintain its own state.
+
+        # Initialize strategy's internal data history if it needs it separately
+        # For EWMAC, it builds its history internally via update_data_history.
+        self.strategy.data_history = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume']) # Reset history
+
+        for timestamp, row in self.data_feed_df.iterrows():
+            # Ensure timestamp is timezone-aware (UTC)
+            ts_aware = timestamp.tz_localize('UTC') if timestamp.tzinfo is None else timestamp.tz_convert('UTC')
+
+            current_bar = BarData(
+                timestamp=ts_aware,
+                open=row['open'],
+                high=row['high'],
+                low=row['low'],
+                close=row['close'],
+                volume=row['volume'],
+                symbol=self.strategy.symbol,
+                timeframe=self.strategy.timeframe
+            )
+            
+            # 1. Check for Stop-Loss / Take-Profit first based on H/L prices of current bar
+            # This assumes SL/TP can be triggered intra-bar.
+            sl_tp_triggered = self._check_stop_loss_take_profit(current_bar)
+            
+            # 2. If SL/TP not triggered, get signal from strategy for the current bar's close
+            # The strategy's on_bar_data uses its internal history which is updated within the method.
+            if not sl_tp_triggered:
+                signal = self.strategy.on_bar_data(current_bar) # Strategy updates its state and history
+                
+                if signal and signal != SignalType.HOLD:
+                    # Assumption: Trades are executed at the close price of the bar where signal is generated.
+                    # Or, for more realism, at the open of the *next* bar.
+                    # For this basic engine, we'll use current bar's close.
+                    execution_price = current_bar.close
+                    self._execute_trade(signal, current_bar.timestamp, execution_price)
+
+            # 3. Log portfolio state at the end of each bar
+            current_portfolio_value = self.current_capital
+            if self.current_position_side == OrderSide.BUY and self.entry_price is not None:
+                 # Mark-to-market value of current open position
+                current_portfolio_value += self.current_position_size * current_bar.close
+            
+            self.portfolio_history.append({
+                "timestamp": current_bar.timestamp,
+                "capital": self.current_capital, # Cash available
+                "position_size": self.current_position_size if self.current_position_side else 0,
+                "asset_value": (self.current_position_size * current_bar.close) if self.current_position_side else 0,
+                "total_value": current_portfolio_value,
+                "current_price": current_bar.close
+            })
+
+        # If there's an open position at the end of the backtest, close it at the last bar's close price
+        if self.current_position_side == OrderSide.BUY:
+            last_bar_timestamp = self.data_feed_df.index[-1]
+            last_bar_close = self.data_feed_df['close'].iloc[-1]
+            logger.info(f"{last_bar_timestamp} - End of backtest. Closing open LONG position for {self.strategy.symbol} at ${last_bar_close:.2f}")
+            self._execute_trade(SignalType.CLOSE_LONG, last_bar_timestamp.tz_localize('UTC') if last_bar_timestamp.tzinfo is None else last_bar_timestamp.tz_convert('UTC'), last_bar_close)
+        
+        final_portfolio_state = {
+            "initial_capital": self.initial_capital,
+            "final_capital_cash": self.current_capital, # This is the cash after all trades
+            "final_position_size": self.current_position_size, # Should be 0 if all closed
+            "total_value": self.portfolio_history[-1]['total_value'] if self.portfolio_history else self.initial_capital,
+            "end_timestamp": self.data_feed_df.index[-1]
+        }
+        
+        logger.info(f"Backtest run completed. Final Portfolio Value: ${final_portfolio_state['total_value']:.2f}")
+        return self.trades_log, final_portfolio_state
+</code>
+
+backtesting_engine/performance_analyzer.py:
+<code>
+# kamikaze_komodo/backtesting_engine/performance_analyzer.py
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Any, Optional
+from kamikaze_komodo.core.models import Trade
+from kamikaze_komodo.core.enums import TradeResult
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+class PerformanceAnalyzer:
+    """
+    Calculates and analyzes performance metrics from a list of trades.
+    """
+    def __init__(self, trades: List[Trade], initial_capital: float, final_capital: float):
+        if not trades:
+            logger.warning("PerformanceAnalyzer initialized with no trades. Some metrics might be zero or NaN.")
+        self.trades = pd.DataFrame([trade.model_dump() for trade in trades])
+        if not self.trades.empty:
+            self.trades['entry_timestamp'] = pd.to_datetime(self.trades['entry_timestamp'])
+            self.trades['exit_timestamp'] = pd.to_datetime(self.trades['exit_timestamp'])
+        
+        self.initial_capital = initial_capital
+        self.final_capital = final_capital # This should be the final total portfolio value
+        logger.info(f"PerformanceAnalyzer initialized with {len(trades)} trades. Initial: ${initial_capital:,.2f}, Final: ${final_capital:,.2f}")
+
+
+    def get_pnl_series(self) -> pd.Series:
+        """Returns a Series of PnL for each trade."""
+        if self.trades.empty or 'pnl' not in self.trades.columns:
+            return pd.Series(dtype=float)
+        return self.trades['pnl'].dropna()
+
+    def get_equity_curve(self) -> pd.Series:
+        """Generates an equity curve based on trade PnLs."""
+        if self.trades.empty or 'pnl' not in self.trades.columns:
+            equity = pd.Series([self.initial_capital], index=[pd.Timestamp(0)]) # Placeholder
+            equity.name = "Equity"
+            return equity
+            
+        # Ensure PnL is numeric and trades are sorted by exit time for accurate curve
+        pnl_series = self.trades.set_index('exit_timestamp')['pnl'].dropna().astype(float)
+        if pnl_series.empty:
+             equity = pd.Series([self.initial_capital], index=[pd.Timestamp(0)])
+             equity.name = "Equity"
+             return equity
+
+        cumulative_pnl = pnl_series.cumsum()
+        equity = self.initial_capital + cumulative_pnl
+        
+        # Add initial capital point
+        # Find the earliest entry time, or use a synthetic start time if no trades
+        start_time = self.trades['entry_timestamp'].min() if not self.trades.empty else pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=1)
+        # Ensure start_time is before the first trade's exit_timestamp for proper plotting.
+        # If pnl_series index is not empty, make sure start_time is before its first element.
+        if not pnl_series.empty and start_time > pnl_series.index[0]:
+            start_time = pnl_series.index[0] - pd.Timedelta(seconds=1)
+
+        equity = pd.concat([pd.Series([self.initial_capital], index=[start_time]), equity])
+        equity.name = "Equity"
+        return equity
+
+
+    def calculate_metrics(self) -> Dict[str, Any]:
+        """
+        Calculates a comprehensive suite of performance metrics.
+        """
+        metrics: Dict[str, Any] = {
+            "initial_capital": self.initial_capital,
+            "final_capital": self.final_capital,
+            "total_net_profit": 0.0,
+            "total_return_pct": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "breakeven_trades": 0,
+            "win_rate_pct": 0.0,
+            "loss_rate_pct": 0.0,
+            "average_pnl_per_trade": 0.0,
+            "average_win_pnl": 0.0,
+            "average_loss_pnl": 0.0,
+            "profit_factor": np.nan, # Gross Profit / Gross Loss
+            "max_drawdown_pct": 0.0, # Needs equity curve
+            "sharpe_ratio": np.nan, # Needs daily/periodic returns & risk-free rate
+            "sortino_ratio": np.nan, # Needs daily/periodic returns & risk-free rate & downside deviation
+            "total_fees_paid": 0.0,
+        }
+
+        if self.trades.empty:
+            metrics["total_net_profit"] = self.final_capital - self.initial_capital
+            if self.initial_capital > 0:
+                 metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
+            logger.warning("No trades to analyze. Returning basic capital metrics.")
+            return metrics
+
+        # PnL calculations
+        pnl_series = self.get_pnl_series()
+        if pnl_series.empty and not self.trades.empty: # PnL might be all NaN if trades didn't close
+            logger.warning("PnL series is empty or all NaN, cannot calculate detailed metrics.")
+            metrics["total_net_profit"] = self.final_capital - self.initial_capital
+            if self.initial_capital > 0:
+                 metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
+            metrics["total_trades"] = len(self.trades)
+            metrics["total_fees_paid"] = self.trades['commission'].sum() if 'commission' in self.trades.columns else 0.0
+            return metrics
+
+        metrics["total_net_profit"] = pnl_series.sum()
+        if self.initial_capital > 0: # Avoid division by zero
+            metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
+        
+        metrics["total_trades"] = len(pnl_series)
+        if metrics["total_trades"] == 0: # No closed trades with PnL
+             metrics["total_fees_paid"] = self.trades['commission'].sum() if 'commission' in self.trades.columns else 0.0
+             return metrics
+
+
+        # Win/Loss Analysis
+        wins = pnl_series[pnl_series > 0]
+        losses = pnl_series[pnl_series < 0]
+        breakevens = pnl_series[pnl_series == 0]
+
+        metrics["winning_trades"] = len(wins)
+        metrics["losing_trades"] = len(losses)
+        metrics["breakeven_trades"] = len(breakevens)
+
+        if metrics["total_trades"] > 0:
+            metrics["win_rate_pct"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
+            metrics["loss_rate_pct"] = (metrics["losing_trades"] / metrics["total_trades"]) * 100
+            metrics["average_pnl_per_trade"] = pnl_series.mean()
+
+        if not wins.empty:
+            metrics["average_win_pnl"] = wins.mean()
+        if not losses.empty:
+            metrics["average_loss_pnl"] = losses.mean() # This will be negative
+
+        # Profit Factor
+        gross_profit = wins.sum()
+        gross_loss = abs(losses.sum()) # Absolute sum of losses
+        if gross_loss > 0:
+            metrics["profit_factor"] = gross_profit / gross_loss
+        elif gross_profit > 0 and gross_loss == 0 : # All wins, no losses
+            metrics["profit_factor"] = np.inf
+
+
+        # Max Drawdown (from equity curve)
+        equity_curve = self.get_equity_curve()
+        if not equity_curve.empty and len(equity_curve) > 1:
+            peak = equity_curve.expanding(min_periods=1).max()
+            drawdown = (equity_curve - peak) / peak
+            metrics["max_drawdown_pct"] = abs(drawdown.min()) * 100
+        
+        # Sharpe and Sortino Ratios (Simplified: assumes daily returns if data allows)
+        # These require more complex calculations of periodic returns and risk-free rate.
+        # For a basic version, we can skip or use a simplified placeholder if PnL series represents portfolio value changes.
+        # daily_returns = equity_curve.pct_change().dropna() # if equity curve represents daily values
+        # if not daily_returns.empty and len(daily_returns) > 1:
+        #     # Assuming risk-free rate of 0 for simplicity
+        #     sharpe_avg_return = daily_returns.mean()
+        #     sharpe_std_return = daily_returns.std()
+        #     if sharpe_std_return != 0:
+        #         metrics["sharpe_ratio"] = (sharpe_avg_return / sharpe_std_return) * np.sqrt(252) # Annualized (approx for crypto: 365)
+            
+        #     downside_returns = daily_returns[daily_returns < 0]
+        #     if not downside_returns.empty:
+        #         downside_std = downside_returns.std()
+        #         if downside_std != 0:
+        #             metrics["sortino_ratio"] = (sharpe_avg_return / downside_std) * np.sqrt(252) # Annualized
+
+        metrics["total_fees_paid"] = self.trades['commission'].sum() if 'commission' in self.trades.columns else 0.0
+
+        return metrics
+
+    def print_summary(self, metrics: Optional[Dict[str, Any]] = None):
+        """Prints a summary of the performance metrics."""
+        if metrics is None:
+            metrics = self.calculate_metrics()
+
+        summary = f"""
+        --------------------------------------------------
+        |              Backtest Performance Summary      |
+        --------------------------------------------------
+        | Metric                      | Value            |
+        --------------------------------------------------
+        | Initial Capital             | ${metrics.get("initial_capital", 0):<15,.2f} |
+        | Final Capital               | ${metrics.get("final_capital", 0):<15,.2f} |
+        | Total Net Profit            | ${metrics.get("total_net_profit", 0):<15,.2f} |
+        | Total Return                | {metrics.get("total_return_pct", 0):<15.2f}% |
+        | Total Trades                | {metrics.get("total_trades", 0):<16} |
+        | Winning Trades              | {metrics.get("winning_trades", 0):<16} |
+        | Losing Trades               | {metrics.get("losing_trades", 0):<16} |
+        | Breakeven Trades            | {metrics.get("breakeven_trades", 0):<16} |
+        | Win Rate                    | {metrics.get("win_rate_pct", 0):<15.2f}% |
+        | Loss Rate                   | {metrics.get("loss_rate_pct", 0):<15.2f}% |
+        | Avg PnL per Trade           | ${metrics.get("average_pnl_per_trade", 0):<15,.2f} |
+        | Avg Win PnL                 | ${metrics.get("average_win_pnl", 0):<15,.2f} |
+        | Avg Loss PnL                | ${metrics.get("average_loss_pnl", 0):<15,.2f} |
+        | Profit Factor               | {metrics.get("profit_factor", float('nan')):<16.2f} |
+        | Max Drawdown                | {metrics.get("max_drawdown_pct", 0):<15.2f}% |
+        | Total Fees Paid             | ${metrics.get("total_fees_paid", 0):<15,.2f} |
+        | Sharpe Ratio (approx)       | {metrics.get("sharpe_ratio", float('nan')):<16.2f} |
+        | Sortino Ratio (approx)      | {metrics.get("sortino_ratio", float('nan')):<16.2f} |
+        --------------------------------------------------
+        """
+        print(summary)
+        logger.info("Performance summary generated." + summary.replace("\n        |", "\n")) # Loggable format
+
+
+# Example Usage:
+if __name__ == '__main__':
+    # Create some dummy trade data
+    dummy_trades_data = [
+        Trade(id="t1", symbol="BTC/USD", entry_order_id="e1", exit_order_id="ex1", side=OrderSide.BUY,
+              entry_price=30000, exit_price=31000, amount=1, entry_timestamp=datetime(2023,1,1,10), exit_timestamp=datetime(2023,1,1,12),
+              pnl=980, pnl_percentage=(1000/30000 - 0.002)*100, commission=20, result=TradeResult.WIN),
+        Trade(id="t2", symbol="BTC/USD", entry_order_id="e2", exit_order_id="ex2", side=OrderSide.BUY,
+              entry_price=31500, exit_price=31000, amount=1, entry_timestamp=datetime(2023,1,2,10), exit_timestamp=datetime(2023,1,2,15),
+              pnl=-520, pnl_percentage=(-500/31500 - 0.002)*100, commission=20, result=TradeResult.LOSS),
+        Trade(id="t3", symbol="BTC/USD", entry_order_id="e3", exit_order_id="ex3", side=OrderSide.BUY,
+              entry_price=32000, exit_price=33000, amount=0.5, entry_timestamp=datetime(2023,1,3,10), exit_timestamp=datetime(2023,1,3,18),
+              pnl=485, pnl_percentage=(1000/32000 * 0.5 - 0.002)*100, commission=15, result=TradeResult.WIN), # PnL adjusted for 0.5 amount logic
+    ]
+    # Correcting PnL for T3: (33000-32000)*0.5 = 500.  Net PnL = 500 - 15 (commission) = 485
+    # Pct: ((33000/32000)-1)*100 = 3.125%. After commission approx.
+
+    initial_cap = 100000
+    final_cap = initial_cap + (980 - 520 + 485) # 100000 + 945 = 100945
+
+    analyzer = PerformanceAnalyzer(trades=dummy_trades_data, initial_capital=initial_cap, final_capital=final_cap)
+    metrics_calculated = analyzer.calculate_metrics()
+    analyzer.print_summary(metrics_calculated)
+
+    # equity = analyzer.get_equity_curve()
+    # print("\nEquity Curve:")
+    # print(equity)
+</code>
+
+backtesting_engine/__init__.py:
+<code>
+# kamikaze_komodo/backtesting_engine/__init__.py
+# This file makes the 'backtesting_engine' directory a Python package.
+</code>
+
+config/config.ini:
+<code>
+; kamikaze_komodo/config/config.ini
+[General]
+LogLevel = INFO
+LogFilePath = logs/kamikaze_komodo.log
+
+[API]
+KrakenApiKey = 'M9exksAn/t8Zii9j2EipeoPHGMpk04mW7pTLdnojjM43o8hXqw4uSqt7'
+KrakenApiSecret = '8TfFCPy5WBmfUsaXQX6OwRL+PpFfpxTBMqPaT3/y95pRkWx4hA0c/gj4xsd0Z6NY8bzhFec300rAlOl85viSoQ=='
+KrakenTestnet = True ; Use True for paper trading/testing if available
+
+[DataFetching]
+DefaultSymbol = BTC/USD
+DefaultTimeframe = 1h
+HistoricalDataDays = 365
+
+[Trading]
+MaxPortfolioRisk = 0.02 ; Max 2% of portfolio at risk per trade
+DefaultLeverage = 1.0
+
+[EWMAC_Strategy]
+ShortWindow = 12
+LongWindow = 26
+SignalWindow = 9 ; For MACD signal line, if used. For simple crossover, not directly used.
+</code>
+
+config/secrets.ini:
+<code>
+; kamikaze_komodo/config/secrets.ini
+; This file should be in .gitignore and contain sensitive information.
+[KRAKEN_API]
+API_KEY = 'M9exksAn/t8Zii9j2EipeoPHGMpk04mW7pTLdnojjM43o8hXqw4uSqt7'
+SECRET_KEY = '8TfFCPy5WBmfUsaXQX6OwRL+PpFfpxTBMqPaT3/y95pRkWx4hA0c/gj4xsd0Z6NY8bzhFec300rAlOl85viSoQ=='
+
+[DATABASE]
+User = db_user
+Password = db_password
+</code>
+
+config/settings.py:
+<code>
+# kamikaze_komodo/config/settings.py
+import configparser
+import os
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+class Config:
+    """
+    Manages application configuration using config.ini and secrets.ini.
+    """
+    def __init__(self, config_file='config/config.ini', secrets_file='config/secrets.ini'):
+        self.config = configparser.ConfigParser()
+        self.secrets = configparser.ConfigParser()
+
+        # Determine absolute paths for config files
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # kamikaze_komodo directory
+        self.config_file_path = os.path.join(base_dir, config_file)
+        self.secrets_file_path = os.path.join(base_dir, secrets_file)
+        
+        if not os.path.exists(self.config_file_path):
+            logger.error(f"Config file not found: {self.config_file_path}")
+            raise FileNotFoundError(f"Config file not found: {self.config_file_path}")
+        if not os.path.exists(self.secrets_file_path):
+            logger.warning(f"Secrets file not found: {self.secrets_file_path}. Some features might be unavailable.")
+            # For now, we allow it to proceed without secrets for non-critical parts
+            # raise FileNotFoundError(f"Secrets file not found: {self.secrets_file_path}")
+
+        self.config.read(self.config_file_path)
+        self.secrets.read(self.secrets_file_path)
+
+        # General Settings
+        self.log_level: str = self.config.get('General', 'LogLevel', fallback='INFO')
+        self.log_file_path: str = self.config.get('General', 'LogFilePath', fallback='logs/kamikaze_komodo.log')
+
+        # API Settings
+        self.kraken_api_key: str | None = self.secrets.get('KRAKEN_API', 'API_KEY', fallback=None)
+        self.kraken_secret_key: str | None = self.secrets.get('KRAKEN_API', 'SECRET_KEY', fallback=None)
+        self.kraken_testnet: bool = self.config.getboolean('API', 'KrakenTestnet', fallback=True)
+
+
+        # Data Fetching Settings
+        self.default_symbol: str = self.config.get('DataFetching', 'DefaultSymbol', fallback='BTC/USD')
+        self.default_timeframe: str = self.config.get('DataFetching', 'DefaultTimeframe', fallback='1h')
+        self.historical_data_days: int = self.config.getint('DataFetching', 'HistoricalDataDays', fallback=365)
+
+        # Trading Settings
+        self.max_portfolio_risk: float = self.config.getfloat('Trading', 'MaxPortfolioRisk', fallback=0.02)
+        self.default_leverage: float = self.config.getfloat('Trading', 'DefaultLeverage', fallback=1.0)
+        
+        # Strategy Specific Settings (Example for EWMAC)
+        self.ewmac_short_window: int = self.config.getint('EWMAC_Strategy', 'ShortWindow', fallback=12)
+        self.ewmac_long_window: int = self.config.getint('EWMAC_Strategy', 'LongWindow', fallback=26)
+
+
+    def get_strategy_params(self, strategy_name: str) -> dict:
+        """
+        Retrieves parameters for a specific strategy section from config.ini.
+        """
+        params = {}
+        if self.config.has_section(strategy_name):
+            params = dict(self.config.items(strategy_name))
+            # Convert to appropriate types if necessary, e.g., int, float
+            for key, value in params.items():
+                if value.isdigit():
+                    params[key] = int(value)
+                elif '.' in value and all(part.isdigit() or part == '' for part in value.split('.', 1)):
+                    try:
+                        params[key] = float(value)
+                    except ValueError:
+                        pass # Keep as string if float conversion fails
+        else:
+            logger.warning(f"No configuration section found for strategy: {strategy_name}")
+        return params
+
+# Global config instance
+try:
+    settings = Config()
+except FileNotFoundError as e:
+    logger.critical(f"Could not initialize settings due to missing configuration file: {e}")
+    # Handle critical error, perhaps exit or use default fallback if appropriate
+    # For now, we'll allow parts of the system to import this module,
+    # but operations requiring settings will fail.
+    settings = None 
+
+if settings and (not settings.kraken_api_key or settings.kraken_api_key == "YOUR_API_KEY_REPLACE_ME"):
+    logger.warning("Kraken API Key is not configured in secrets.ini. Exchange interaction will be limited.")
+</code>
+
+config/__init__.py:
+<code>
+# kamikaze_komodo/config/__init__.py
+# This file makes the 'config' directory a Python package.
+</code>
+
+core/enums.py:
+<code>
+# kamikaze_komodo/core/enums.py
+from enum import Enum
+
+class OrderType(Enum):
+    """
+    Represents the type of an order.
+    """
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    STOP_LIMIT = "stop_limit"
+    TAKE_PROFIT = "take_profit"
+    TAKE_PROFIT_LIMIT = "take_profit_limit"
+
+class OrderSide(Enum):
+    """
+    Represents the side of an order.
+    """
+    BUY = "buy"
+    SELL = "sell"
+
+class SignalType(Enum):
+    """
+    Represents the type of trading signal generated by a strategy.
+    """
+    LONG = "LONG"
+    SHORT = "SHORT"
+    HOLD = "HOLD"
+    CLOSE_LONG = "CLOSE_LONG"
+    CLOSE_SHORT = "CLOSE_SHORT"
+
+class CandleInterval(Enum):
+    """
+    Represents common candle intervals for market data.
+    Follows CCXT conventions where possible.
+    """
+    ONE_MINUTE = "1m"
+    THREE_MINUTES = "3m"
+    FIVE_MINUTES = "5m"
+    FIFTEEN_MINUTES = "15m"
+    THIRTY_MINUTES = "30m"
+    ONE_HOUR = "1h"
+    TWO_HOURS = "2h"
+    FOUR_HOURS = "4h"
+    SIX_HOURS = "6h"
+    EIGHT_HOURS = "8h"
+    TWELVE_HOURS = "12h"
+    ONE_DAY = "1d"
+    THREE_DAYS = "3d"
+    ONE_WEEK = "1w"
+    ONE_MONTH = "1M"
+
+class TradeResult(Enum):
+    """
+    Represents the outcome of a trade.
+    """
+    WIN = "WIN"
+    LOSS = "LOSS"
+    BREAKEVEN = "BREAKEVEN"
+</code>
+
+core/models.py:
+<code>
+# kamikaze_komodo/core/models.py
+from typing import Optional, List, Dict
+from pydantic import BaseModel, Field
+from datetime import datetime
+from kamikaze_komodo.core.enums import OrderType, OrderSide, SignalType, TradeResult
+
+class BarData(BaseModel):
+    """
+    Represents OHLCV market data for a specific time interval.
+    """
+    timestamp: datetime = Field(..., description="The start time of the candle")
+    open: float = Field(..., gt=0, description="Opening price")
+    high: float = Field(..., gt=0, description="Highest price")
+    low: float = Field(..., gt=0, description="Lowest price")
+    close: float = Field(..., gt=0, description="Closing price")
+    volume: float = Field(..., ge=0, description="Trading volume")
+    symbol: Optional[str] = Field(None, description="Trading symbol, e.g., BTC/USD")
+    timeframe: Optional[str] = Field(None, description="Candle timeframe, e.g., 1h")
+
+    class Config:
+        frozen = True # Makes BarData hashable if needed for pandas or dict keys
+
+
+class Order(BaseModel):
+    """
+    Represents a trading order.
+    """
+    id: str = Field(..., description="Unique order identifier (from exchange or internal)")
+    symbol: str = Field(..., description="Trading symbol, e.g., BTC/USD")
+    type: OrderType = Field(..., description="Type of order (market, limit, etc.)")
+    side: OrderSide = Field(..., description="Order side (buy or sell)")
+    amount: float = Field(..., gt=0, description="Quantity of the asset to trade")
+    price: Optional[float] = Field(None, gt=0, description="Price for limit or stop orders")
+    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Time the order was created")
+    status: str = Field("open", description="Current status of the order (e.g., open, filled, canceled)")
+    filled_amount: float = Field(0.0, ge=0, description="Amount of the order that has been filled")
+    average_fill_price: Optional[float] = Field(None, description="Average price at which the order was filled")
+    exchange_id: Optional[str] = Field(None, description="Order ID from the exchange")
+
+class Trade(BaseModel):
+    """
+    Represents an executed trade.
+    """
+    id: str = Field(..., description="Unique trade identifier")
+    symbol: str = Field(..., description="Trading symbol, e.g., BTC/USD")
+    entry_order_id: str = Field(..., description="ID of the order that opened the trade")
+    exit_order_id: Optional[str] = Field(None, description="ID of the order that closed the trade")
+    side: OrderSide = Field(..., description="Trade side (buy/long or sell/short)")
+    entry_price: float = Field(..., gt=0, description="Price at which the trade was entered")
+    exit_price: Optional[float] = Field(None, gt=0, description="Price at which the trade was exited")
+    amount: float = Field(..., gt=0, description="Quantity of the asset traded")
+    entry_timestamp: datetime = Field(..., description="Time the trade was entered")
+    exit_timestamp: Optional[datetime] = Field(None, description="Time the trade was exited")
+    pnl: Optional[float] = Field(None, description="Profit or Loss for the trade")
+    pnl_percentage: Optional[float] = Field(None, description="Profit or Loss percentage for the trade")
+    commission: float = Field(0.0, ge=0, description="Trading commission paid")
+    result: Optional[TradeResult] = Field(None, description="Outcome of the trade (Win/Loss/Breakeven)")
+    notes: Optional[str] = Field(None, description="Any notes related to the trade")
+
+
+class NewsArticle(BaseModel):
+    """
+    Represents a news article relevant to market analysis.
+    """
+    id: str = Field(..., description="Unique identifier for the news article (e.g., URL hash)")
+    url: str = Field(..., description="Source URL of the article")
+    title: str = Field(..., description="Headline or title of the article")
+    publication_date: Optional[datetime] = Field(None, description="Date the article was published")
+    retrieval_date: datetime = Field(default_factory=datetime.utcnow, description="Date the article was retrieved")
+    source: str = Field(..., description="Source of the news (e.g., CoinDesk, CoinTelegraph)")
+    content: Optional[str] = Field(None, description="Full text content of the article")
+    summary: Optional[str] = Field(None, description="AI-generated or scraped summary")
+    sentiment_score: Optional[float] = Field(None, description="Sentiment score (-1.0 to 1.0)")
+    sentiment_label: Optional[str] = Field(None, description="Sentiment label (e.g., positive, negative, neutral)")
+    related_symbols: Optional[List[str]] = Field(default_factory=list, description="Cryptocurrencies mentioned or related")
+
+class PortfolioSnapshot(BaseModel):
+    """
+    Represents the state of the portfolio at a specific time.
+    """
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    total_value_usd: float = Field(..., description="Total portfolio value in USD")
+    cash_balance_usd: float = Field(..., description="Available cash in USD")
+    positions: Dict[str, float] = Field(default_factory=dict, description="Asset quantities, e.g., {'BTC': 0.5, 'ETH': 10}") # symbol: quantity
+    open_pnl_usd: float = Field(0.0, description="Total open Profit/Loss in USD for current positions")
+</code>
+
+core/utils.py:
+<code>
+# kamikaze_komodo/core/utils.py
+from datetime import datetime, timezone
+
+def format_timestamp(ts: datetime, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
+    """
+    Formats a datetime object into a string.
+    Ensures timezone awareness, defaulting to UTC if naive.
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.strftime(fmt)
+
+def current_timestamp_ms() -> int:
+    """
+    Returns the current UTC timestamp in milliseconds.
+    """
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> 'BarData':
+    """
+    Converts a CCXT OHLCV list [timestamp_ms, open, high, low, close, volume]
+    to a BarData object.
+    """
+    from kamikaze_komodo.core.models import BarData # Local import to avoid circular dependency
+    
+    if len(ohlcv) != 6:
+        raise ValueError("OHLCV list must contain 6 elements: timestamp, open, high, low, close, volume")
+
+    dt_object = datetime.fromtimestamp(ohlcv[0] / 1000, tz=timezone.utc)
+    return BarData(
+        timestamp=dt_object,
+        open=float(ohlcv[1]),
+        high=float(ohlcv[2]),
+        low=float(ohlcv[3]),
+        close=float(ohlcv[4]),
+        volume=float(ohlcv[5]),
+        symbol=symbol,
+        timeframe=timeframe
+    )
+
+# Add other utility functions as needed, e.g.,
+# - Mathematical helpers not in TA-Lib
+# - Data validation functions
+# - etc.
+</code>
+
+core/__init__.py:
+<code>
+# kamikaze_komodo/core/__init__.py
+# This file makes the 'core' directory a Python package.
+</code>
+
+data_handling/database_manager.py:
+<code>
+# kamikaze_komodo/data_handling/database_manager.py
+import sqlite3
+from typing import List, Optional
+from kamikaze_komodo.core.models import BarData
+from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings
+from datetime import datetime, timezone
+
+logger = get_logger(__name__)
+
+class DatabaseManager:
+    """
+    Manages local storage of data (initially SQLite).
+    """
+    def __init__(self, db_name: str = "kamikaze_komodo_data.db"):
+        self.db_name = db_name
+        self.conn: Optional[sqlite3.Connection] = None
+        self._connect()
+        self._create_tables()
+
+    def _connect(self):
+        """Establishes a connection to the SQLite database."""
+        try:
+            self.conn = sqlite3.connect(self.db_name, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+            self.conn.row_factory = sqlite3.Row # Access columns by name
+            logger.info(f"Successfully connected to database: {self.db_name}")
+        except sqlite3.Error as e:
+            logger.error(f"Error connecting to database {self.db_name}: {e}")
+            self.conn = None # Ensure conn is None if connection failed
+
+    def _create_tables(self):
+        """Creates necessary tables if they don't exist."""
+        if not self.conn:
+            logger.error("Cannot create tables, no database connection.")
+            return
+
+        try:
+            cursor = self.conn.cursor()
+            # BarData Table
+            # Storing symbol and timeframe to allow data for multiple assets/resolutions
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bar_data (
+                    timestamp TIMESTAMP NOT NULL,
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL,
+                    PRIMARY KEY (timestamp, symbol, timeframe)
+                )
+            """)
+            # NewsArticle Table (Example for future use)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS news_articles (
+                    id TEXT PRIMARY KEY,
+                    url TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL,
+                    publication_date TIMESTAMP,
+                    retrieval_date TIMESTAMP NOT NULL,
+                    source TEXT NOT NULL,
+                    content TEXT,
+                    summary TEXT,
+                    sentiment_score REAL,
+                    sentiment_label TEXT
+                )
+            """)
+            # Trades Table (Example for future use)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_order_id TEXT,
+                    exit_order_id TEXT,
+                    side TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL,
+                    amount REAL NOT NULL,
+                    entry_timestamp TIMESTAMP NOT NULL,
+                    exit_timestamp TIMESTAMP,
+                    pnl REAL,
+                    pnl_percentage REAL,
+                    commission REAL DEFAULT 0.0,
+                    result TEXT,
+                    notes TEXT
+                )
+            """)
+            self.conn.commit()
+            logger.info("Tables checked/created successfully.")
+        except sqlite3.Error as e:
+            logger.error(f"Error creating tables: {e}")
+
+    def store_bar_data(self, bar_data_list: List[BarData]):
+        """
+        Stores a list of BarData objects into the database.
+        Uses INSERT OR IGNORE to avoid duplicates based on primary key (timestamp, symbol, timeframe).
+        """
+        if not self.conn:
+            logger.error("Cannot store bar data, no database connection.")
+            return False
+        if not bar_data_list:
+            logger.info("No bar data provided to store.")
+            return True
+
+        try:
+            cursor = self.conn.cursor()
+            data_to_insert = [
+                (
+                    bd.timestamp, bd.symbol, bd.timeframe,
+                    bd.open, bd.high, bd.low, bd.close, bd.volume
+                )
+                for bd in bar_data_list
+            ]
+            cursor.executemany("""
+                INSERT OR IGNORE INTO bar_data 
+                (timestamp, symbol, timeframe, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, data_to_insert)
+            self.conn.commit()
+            logger.info(f"Stored/Ignored {len(data_to_insert)} bar data entries. ({cursor.rowcount} actually inserted/replaced)")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error storing bar data: {e}")
+            return False
+
+    def retrieve_bar_data(self, symbol: str, timeframe: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[BarData]:
+        """
+        Retrieves BarData objects from the database for a given symbol and timeframe,
+        optionally filtered by a date range.
+        """
+        if not self.conn:
+            logger.error("Cannot retrieve bar data, no database connection.")
+            return []
+
+        try:
+            cursor = self.conn.cursor()
+            query = "SELECT timestamp, open, high, low, close, volume, symbol, timeframe FROM bar_data WHERE symbol = ? AND timeframe = ?"
+            params = [symbol, timeframe]
+
+            if start_date:
+                query += " AND timestamp >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND timestamp <= ?"
+                params.append(end_date)
+            
+            query += " ORDER BY timestamp ASC" # Ensure chronological order
+
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+            bar_data_list = []
+            for row in rows:
+                # Ensure timestamp from DB (stored as UTC implicitly by sqlite3 for datetime objects)
+                # is correctly interpreted as UTC when creating BarData
+                ts = row['timestamp']
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+
+                bar_data_list.append(BarData(
+                    timestamp=ts,
+                    open=row['open'],
+                    high=row['high'],
+                    low=row['low'],
+                    close=row['close'],
+                    volume=row['volume'],
+                    symbol=row['symbol'],
+                    timeframe=row['timeframe']
+                ))
+            logger.info(f"Retrieved {len(bar_data_list)} bar data entries for {symbol} ({timeframe}).")
+            return bar_data_list
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving bar data for {symbol} ({timeframe}): {e}")
+            return []
+
+    def close(self):
+        """Closes the database connection."""
+        if self.conn:
+            self.conn.close()
+            logger.info("Database connection closed.")
+            self.conn = None
+
+    def __del__(self):
+        """Ensures the database connection is closed when the object is garbage collected."""
+        self.close()
+
+# Example of usage (typically, one instance would be shared across the application)
+# db_manager = DatabaseManager()
+</code>
+
+data_handling/data_fetcher.py:
+<code>
+# kamikaze_komodo/data_handling/data_fetcher.py
+import ccxt.async_support as ccxt # Use async version for future compatibility
+import asyncio
+from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from kamikaze_komodo.core.models import BarData
+from kamikaze_komodo.core.utils import ohlcv_to_bardata
+from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings
+
+logger = get_logger(__name__)
+
+class DataFetcher:
+    """
+    Fetches historical and real-time market data using CCXT.
+    """
+    def __init__(self, exchange_id: str = 'kraken'):
+        if not settings:
+            logger.critical("Settings not loaded. DataFetcher cannot be initialized.")
+            raise ValueError("Settings not loaded.")
+
+        self.exchange_id = exchange_id
+        exchange_class = getattr(ccxt, self.exchange_id, None)
+        if not exchange_class:
+            logger.error(f"Exchange {self.exchange_id} is not supported by CCXT.")
+            raise ValueError(f"Exchange {self.exchange_id} is not supported by CCXT.")
+
+        config = {
+            'apiKey': settings.kraken_api_key,
+            'secret': settings.kraken_secret_key,
+            'enableRateLimit': True, # Recommended by CCXT
+        }
+        # CCXT specific options for testnet if applicable (Kraken uses demo accounts via separate API keys or website settings)
+        # For Kraken, 'test': True in ccxt options usually refers to their old test API,
+        # which is not the same as their sandbox/demo. Actual paper trading setup might differ.
+        # We rely on the user configuring API keys for a demo account if desired.
+        # if settings.kraken_testnet and self.exchange_id == 'binance': # Example for Binance
+        #     config['options'] = {'defaultType': 'future', 'test': True}
+
+
+        self.exchange = exchange_class(config)
+        logger.info(f"Initialized DataFetcher for {self.exchange_id}. Testnet mode: {settings.kraken_testnet}")
+
+
+    async def fetch_historical_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+        params: Optional[dict] = None
+    ) -> List[BarData]:
+        """
+        Fetches historical OHLCV data for a given symbol and timeframe.
+
+        Args:
+            symbol (str): The trading symbol (e.g., 'BTC/USD').
+            timeframe (str): The timeframe (e.g., '1h', '1d'). CCXT format.
+            since (Optional[datetime]): Start date (UTC datetime aware). If None, fetches recent data.
+            limit (Optional[int]): Number of candles to fetch.
+            params (Optional[dict]): Extra parameters to pass to the exchange API.
+
+        Returns:
+            List[BarData]: A list of BarData objects.
+        """
+        if not self.exchange.has['fetchOHLCV']:
+            logger.error(f"{self.exchange_id} does not support fetchOHLCV.")
+            await self.close()
+            return []
+
+        since_timestamp_ms = None
+        if since:
+            if since.tzinfo is None: # Ensure 'since' is timezone-aware
+                since = since.replace(tzinfo=timezone.utc)
+            since_timestamp_ms = int(since.timestamp() * 1000)
+
+        ohlcv_data_list = []
+        try:
+            logger.info(f"Fetching historical OHLCV for {symbol} ({timeframe}) since {since} with limit {limit}")
+            # CCXT fetch_ohlcv: (symbol, timeframe='1m', since=None, limit=None, params={})
+            raw_ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe, since_timestamp_ms, limit, params)
+            
+            if raw_ohlcv:
+                for entry in raw_ohlcv:
+                    try:
+                        bar = ohlcv_to_bardata(entry, symbol, timeframe)
+                        ohlcv_data_list.append(bar)
+                    except ValueError as e:
+                        logger.warning(f"Skipping invalid OHLCV entry for {symbol}: {entry}. Error: {e}")
+                logger.info(f"Successfully fetched {len(ohlcv_data_list)} candles for {symbol} ({timeframe}).")
+            else:
+                logger.info(f"No OHLCV data returned for {symbol} ({timeframe}) with the given parameters.")
+
+        except ccxt.NetworkError as e:
+            logger.error(f"Network error fetching OHLCV for {symbol}: {e}")
+        except ccxt.ExchangeError as e:
+            logger.error(f"Exchange error fetching OHLCV for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred fetching OHLCV for {symbol}: {e}")
+        
+        return ohlcv_data_list
+
+    async def fetch_historical_data_for_period(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: datetime,
+        end_date: datetime = datetime.now(timezone.utc)
+    ) -> List[BarData]:
+        """
+        Fetches historical OHLCV data for a specified period, handling pagination if necessary.
+        This is a simplified pagination; robust pagination needs to handle exchange-specific limits.
+        """
+        all_bars: List[BarData] = []
+        current_start_date = start_date
+        
+        # Calculate timeframe duration for stepping
+        # This is a rough estimation, not perfectly accurate for all timeframes like '1M'
+        timeframe_duration_seconds = self.exchange.parse_timeframe(timeframe) # in seconds
+        if timeframe_duration_seconds is None:
+            logger.error(f"Could not parse timeframe: {timeframe}. Cannot paginate effectively.")
+            return await self.fetch_historical_ohlcv(symbol, timeframe, since=start_date)
+
+        logger.info(f"Fetching data for {symbol} ({timeframe}) from {start_date} to {end_date}")
+
+        while current_start_date < end_date:
+            # Fetch a batch of data (e.g., 500 candles, a common limit)
+            # CCXT's limit is number of candles, not a duration.
+            # For longer periods, we need to make multiple calls.
+            limit_per_call = 500 # Adjust as needed based on exchange rate limits and typical API behavior
+            
+            bars = await self.fetch_historical_ohlcv(symbol, timeframe, since=current_start_date, limit=limit_per_call)
+            if not bars:
+                logger.info(f"No more data found for {symbol} starting {current_start_date}, or an error occurred.")
+                break 
+            
+            # Filter bars that are within the requested end_date, as fetch_ohlcv might return more
+            bars = [b for b in bars if b.timestamp < end_date]
+            if not bars: # All fetched bars are past the end_date
+                break
+
+            all_bars.extend(bars)
+            
+            # Move to the next period
+            last_fetched_timestamp = bars[-1].timestamp
+            current_start_date = last_fetched_timestamp + timedelta(seconds=1) # Start after the last fetched candle
+            
+            logger.debug(f"Fetched {len(bars)} bars. Next fetch for {symbol} will start from {current_start_date}. Total collected: {len(all_bars)}")
+            await asyncio.sleep(self.exchange.rateLimit / 1000)  # Respect rate limits
+
+        # Remove duplicates and sort (though ideally, pagination should handle this)
+        if all_bars:
+            unique_bars_dict = {bar.timestamp: bar for bar in all_bars}
+            all_bars = sorted(list(unique_bars_dict.values()), key=lambda b: b.timestamp)
+            logger.info(f"Total unique bars fetched for {symbol} ({timeframe}) in period: {len(all_bars)}")
+        
+        return all_bars
+
+
+    async def subscribe_to_realtime_trades(self, symbol: str):
+        """
+        Placeholder for subscribing to real-time trade data via WebSockets.
+        Actual implementation requires specific WebSocket handling logic per exchange.
+        """
+        if not self.exchange.has['watchTrades']:
+            logger.warning(f"{self.exchange_id} does not support real-time trade watching via WebSockets in CCXT.")
+            await self.close()
+            return
+
+        logger.info(f"Attempting to subscribe to real-time trades for {symbol} on {self.exchange_id}...")
+        # Example structure for WebSocket handling (conceptual)
+        # try:
+        #     while True:
+        #         trades = await self.exchange.watch_trades(symbol)
+        #         for trade in trades:
+        #             logger.info(f"Real-time trade for {symbol}: {trade}")
+        #             # Process trade data (e.g., update internal state, pass to strategies)
+        # except Exception as e:
+        #     logger.error(f"Error in real-time trade subscription for {symbol}: {e}")
+        # finally:
+        #     # await self.exchange.close() # Close WebSocket connection
+        #     pass
+        logger.warning("Real-time data subscription is a placeholder and not fully implemented.")
+        pass
+
+
+    async def close(self):
+        """Closes the CCXT exchange connection."""
+        try:
+            if hasattr(self.exchange, 'close') and callable(self.exchange.close):
+                await self.exchange.close()
+            logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
+        except Exception as e:
+            logger.error(f"Error closing CCXT exchange connection: {e}")
+
+# Example Usage (run within an asyncio event loop):
+async def main_data_fetcher_example():
+    if not settings:
+        print("Settings could not be loaded. Exiting example.")
+        return
+
+    fetcher = DataFetcher(exchange_id='kraken') # or any other CCXT supported exchange
+    
+    # Fetch historical data
+    symbol_to_fetch = settings.default_symbol
+    timeframe_to_fetch = settings.default_timeframe
+    
+    # Fetch last N days of data
+    # since_date = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days)
+    # historical_bars = await fetcher.fetch_historical_ohlcv(symbol_to_fetch, timeframe_to_fetch, since=since_date, limit=100)
+    
+    # Fetch data for a specific period
+    start_period = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    end_period = datetime(2024, 1, 5, tzinfo=timezone.utc) # Fetch a few days
+    historical_bars_period = await fetcher.fetch_historical_data_for_period(
+        symbol_to_fetch, timeframe_to_fetch, start_period, end_period
+    )
+
+    if historical_bars_period:
+        logger.info(f"First 5 fetched bars for {symbol_to_fetch}:")
+        for bar in historical_bars_period[:5]:
+            logger.info(f"{bar.timestamp} O:{bar.open} H:{bar.high} L:{bar.low} C:{bar.close} V:{bar.volume}")
+        
+        # Example: Store fetched data in DB
+        db_manager = DatabaseManager() # Assumes db_manager is accessible or initialized here
+        if db_manager.store_bar_data(historical_bars_period):
+            logger.info("Successfully stored fetched bar data into the database.")
+        
+        retrieved_bars = db_manager.retrieve_bar_data(symbol_to_fetch, timeframe_to_fetch, start_date=start_period, end_date=end_period)
+        logger.info(f"Retrieved {len(retrieved_bars)} bars from DB. First: {retrieved_bars[0] if retrieved_bars else 'None'}")
+        db_manager.close()
+
+    else:
+        logger.warning(f"No historical data fetched for {symbol_to_fetch}.")
+
+    # Placeholder for real-time data
+    # await fetcher.subscribe_to_realtime_trades(symbol_to_fetch)
+
+    await fetcher.close()
+
+if __name__ == '__main__':
+    # This is just for isolated testing of data_fetcher.
+    # In the main application, this would be integrated differently.
+    # Ensure settings are loaded before running this.
+    # For example, by running from the root kamikaze_komodo directory or adjusting paths.
+    # `python -m kamikaze_komodo.data_handling.data_fetcher`
+    
+    # Need to load settings explicitly if running standalone for testing
+    # from kamikaze_komodo.config.settings import Config
+    # settings_instance = Config(config_file='../config/config.ini', secrets_file='../config/secrets.ini')
+    # global settings # make it available globally in this module for the example
+    # settings = settings_instance
+
+    # if settings:
+    #    asyncio.run(main_data_fetcher_example())
+    # else:
+    #    print("Failed to load settings for standalone data_fetcher example.")
+    pass
+</code>
+
+data_handling/__init__.py:
+<code>
+# kamikaze_komodo/data_handling/__init__.py
+# This file makes the 'data_handling' directory a Python package.
+</code>
+
+exchange_interaction/exchange_api.py:
+<code>
+# kamikaze_komodo/exchange_interaction/exchange_api.py
+import ccxt.async_support as ccxt
+import asyncio
+from typing import Dict, Optional, List
+from kamikaze_komodo.core.enums import OrderType, OrderSide
+from kamikaze_komodo.core.models import Order
+from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings
+from datetime import datetime
+
+logger = get_logger(__name__)
+
+class ExchangeAPI:
+    """
+    Handles interactions with the cryptocurrency exchange (e.g., Kraken).
+    Manages order placement, cancellation, and fetching account information.
+    """
+    def __init__(self, exchange_id: str = 'kraken'):
+        if not settings:
+            logger.critical("Settings not loaded. ExchangeAPI cannot be initialized.")
+            raise ValueError("Settings not loaded.")
+            
+        self.exchange_id = exchange_id
+        exchange_class = getattr(ccxt, self.exchange_id, None)
+        if not exchange_class:
+            logger.error(f"Exchange {self.exchange_id} is not supported by CCXT.")
+            raise ValueError(f"Exchange {self.exchange_id} is not supported by CCXT.")
+
+        config = {
+            'apiKey': settings.kraken_api_key,
+            'secret': settings.kraken_secret_key,
+            'enableRateLimit': True,
+        }
+        # Add testnet/sandbox configuration if applicable and supported by CCXT for the exchange
+        # if settings.kraken_testnet and self.exchange_id == 'binance':
+        #     config['options'] = {'defaultType': 'future', 'test': True}
+        # Kraken's sandbox typically uses different API keys for a demo account.
+
+        self.exchange = exchange_class(config)
+        logger.info(f"Initialized ExchangeAPI for {self.exchange_id}. Testnet mode: {settings.kraken_testnet}")
+
+        if not settings.kraken_api_key or settings.kraken_api_key == "YOUR_API_KEY_REPLACE_ME":
+            logger.warning(f"API keys for {self.exchange_id} are not properly set. Authenticated calls will fail.")
+
+
+    async def fetch_balance(self) -> Optional[Dict]:
+        """
+        Fetches the account balance from the exchange.
+        Returns:
+            Optional[Dict]: A dictionary representing the account balance, or None on error.
+                            The structure is defined by CCXT's fetch_balance method.
+        """
+        if not self.exchange.has['fetchBalance']:
+            logger.error(f"{self.exchange_id} does not support fetchBalance.")
+            return None
+        try:
+            balance = await self.exchange.fetch_balance()
+            logger.info(f"Successfully fetched balance from {self.exchange_id}.")
+            # logger.debug(f"Balance details: {balance}") # Can be very verbose
+            return balance
+        except ccxt.NetworkError as e:
+            logger.error(f"Network error fetching balance: {e}")
+        except ccxt.ExchangeError as e:
+            logger.error(f"Exchange error fetching balance: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred fetching balance: {e}")
+        return None
+
+    async def create_order(
+        self,
+        symbol: str,
+        order_type: OrderType,
+        side: OrderSide,
+        amount: float,
+        price: Optional[float] = None,
+        params: Optional[Dict] = None
+    ) -> Optional[Order]:
+        """
+        Places an order on the exchange.
+
+        Args:
+            symbol (str): Trading symbol (e.g., 'BTC/USD').
+            order_type (OrderType): Type of order (market, limit).
+            side (OrderSide): 'buy' or 'sell'.
+            amount (float): Quantity of the asset to trade.
+            price (Optional[float]): Price for limit orders. Required if order_type is LIMIT.
+            params (Optional[Dict]): Additional parameters for the exchange.
+
+        Returns:
+            Optional[Order]: An Order object representing the placed order, or None on error.
+        """
+        if order_type == OrderType.LIMIT and price is None:
+            logger.error("Price must be specified for a LIMIT order.")
+            return None
+        
+        if not self.exchange.has['createOrder']:
+            logger.error(f"{self.exchange_id} does not support createOrder.")
+            return None
+
+        order_type_str = order_type.value
+        side_str = side.value
+
+        try:
+            logger.info(f"Attempting to place {side_str} {order_type_str} order for {amount} {symbol} at price {price if price else 'market'}")
+            
+            # Placeholder: Simulate order creation if in testnet and keys are dummy
+            if settings.kraken_testnet and (not settings.kraken_api_key or "YOUR_API_KEY" in settings.kraken_api_key):
+                logger.warning("Simulating order creation due to testnet mode and dummy API keys.")
+                simulated_order_id = f"sim_{self.exchange_id}_{ccxt.Exchange.uuid()}"
+                return Order(
+                    id=simulated_order_id,
+                    symbol=symbol,
+                    type=order_type,
+                    side=side,
+                    amount=amount,
+                    price=price if order_type == OrderType.LIMIT else None, # Market orders might not have a 'creation' price
+                    timestamp=datetime.utcnow(),
+                    status="open", # Simulated as open initially
+                    exchange_id=simulated_order_id
+                )
+
+            # Actual order creation
+            exchange_order = await self.exchange.create_order(symbol, order_type_str, side_str, amount, price, params or {})
+            logger.info(f"Successfully placed order on {self.exchange_id}. Order ID: {exchange_order.get('id')}")
+            
+            # Map CCXT order response to our Order model
+            # This mapping can be quite detailed depending on the exchange response.
+            created_order = Order(
+                id=str(exchange_order.get('id')),
+                symbol=exchange_order.get('symbol'),
+                type=OrderType(exchange_order.get('type', order_type_str).lower()),
+                side=OrderSide(exchange_order.get('side', side_str).lower()),
+                amount=float(exchange_order.get('amount', amount)),
+                price=float(exchange_order['price']) if exchange_order.get('price') else None,
+                timestamp=datetime.fromtimestamp(exchange_order['timestamp'] / 1000, tz=timezone.utc) if exchange_order.get('timestamp') else datetime.utcnow(),
+                status=exchange_order.get('status', 'open'),
+                filled_amount=float(exchange_order.get('filled', 0.0)),
+                average_fill_price=float(exchange_order.get('average')) if exchange_order.get('average') else None,
+                exchange_id=str(exchange_order.get('id'))
+            )
+            return created_order
+
+        except ccxt.InsufficientFunds as e:
+            logger.error(f"Insufficient funds to place order for {symbol}: {e}")
+        except ccxt.InvalidOrder as e:
+            logger.error(f"Invalid order parameters for {symbol}: {e}")
+        except ccxt.NetworkError as e:
+            logger.error(f"Network error placing order for {symbol}: {e}")
+        except ccxt.ExchangeError as e:
+            logger.error(f"Exchange error placing order for {symbol}: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred placing order for {symbol}: {e}")
+        return None
+
+    async def cancel_order(self, order_id: str, symbol: Optional[str] = None, params: Optional[Dict] = None) -> bool:
+        """
+        Cancels an open order on the exchange.
+
+        Args:
+            order_id (str): The ID of the order to cancel.
+            symbol (Optional[str]): The trading symbol (required by some exchanges for cancelOrder).
+            params (Optional[Dict]): Additional parameters for the exchange.
+
+        Returns:
+            bool: True if the order was successfully canceled, False otherwise.
+        """
+        if not self.exchange.has['cancelOrder']:
+            logger.error(f"{self.exchange_id} does not support cancelOrder.")
+            return False
+        try:
+            # Some exchanges require symbol for cancelOrder, others don't.
+            # CCXT unified API for cancel_order(id, symbol=None, params={})
+            await self.exchange.cancel_order(order_id, symbol, params or {})
+            logger.info(f"Successfully requested cancellation for order ID {order_id} on {self.exchange_id}.")
+            return True # Note: Cancellation might be a request; status needs to be confirmed by fetch_order.
+        except ccxt.OrderNotFound as e:
+            logger.error(f"Order ID {order_id} not found for cancellation: {e}")
+        except ccxt.NetworkError as e:
+            logger.error(f"Network error canceling order {order_id}: {e}")
+        except ccxt.ExchangeError as e:
+            logger.error(f"Exchange error canceling order {order_id}: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred canceling order {order_id}: {e}")
+        return False
+
+    async def fetch_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
+        """
+        Fetches information about a specific order.
+        """
+        if not self.exchange.has['fetchOrder']:
+            logger.warning(f"{self.exchange_id} does not support fetching individual orders directly.")
+            return None
+        try:
+            exchange_order = await self.exchange.fetch_order(order_id, symbol)
+            # Map to internal Order model
+            fetched_order = Order(
+                id=str(exchange_order.get('id')),
+                symbol=exchange_order.get('symbol'),
+                type=OrderType(exchange_order.get('type').lower()),
+                side=OrderSide(exchange_order.get('side').lower()),
+                amount=float(exchange_order.get('amount')),
+                price=float(exchange_order['price']) if exchange_order.get('price') else None,
+                timestamp=datetime.fromtimestamp(exchange_order['timestamp'] / 1000, tz=timezone.utc) if exchange_order.get('timestamp') else datetime.utcnow(),
+                status=exchange_order.get('status'),
+                filled_amount=float(exchange_order.get('filled', 0.0)),
+                average_fill_price=float(exchange_order.get('average')) if exchange_order.get('average') else None,
+                exchange_id=str(exchange_order.get('id'))
+            )
+            return fetched_order
+        except ccxt.OrderNotFound:
+            logger.warning(f"Order {order_id} not found on {self.exchange_id}.")
+        except Exception as e:
+            logger.error(f"Error fetching order {order_id}: {e}")
+        return None
+
+    async def fetch_open_orders(self, symbol: Optional[str] = None, since: Optional[int] = None, limit: Optional[int] = None) -> List[Order]:
+        """
+        Fetches all open orders for a given symbol or all symbols.
+        """
+        open_orders_list = []
+        if not self.exchange.has['fetchOpenOrders']:
+            logger.warning(f"{self.exchange_id} does not support fetching open orders.")
+            return open_orders_list
+        try:
+            raw_orders = await self.exchange.fetch_open_orders(symbol, since, limit)
+            for ex_order in raw_orders:
+                order = Order(
+                    id=str(ex_order.get('id')),
+                    symbol=ex_order.get('symbol'),
+                    type=OrderType(ex_order.get('type').lower()),
+                    side=OrderSide(ex_order.get('side').lower()),
+                    amount=float(ex_order.get('amount')),
+                    price=float(ex_order['price']) if ex_order.get('price') else None,
+                    timestamp=datetime.fromtimestamp(ex_order['timestamp'] / 1000, tz=timezone.utc) if ex_order.get('timestamp') else datetime.utcnow(),
+                    status=ex_order.get('status', 'open'),
+                    filled_amount=float(ex_order.get('filled', 0.0)),
+                    average_fill_price=float(ex_order.get('average')) if ex_order.get('average') else None,
+                    exchange_id=str(ex_order.get('id'))
+                )
+                open_orders_list.append(order)
+            logger.info(f"Fetched {len(open_orders_list)} open orders for symbol {symbol if symbol else 'all'}.")
+        except Exception as e:
+            logger.error(f"Error fetching open orders: {e}")
+        return open_orders_list
+
+
+    async def close(self):
+        """Closes the CCXT exchange connection."""
+        try:
+            if hasattr(self.exchange, 'close') and callable(self.exchange.close):
+                await self.exchange.close()
+            logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
+        except Exception as e:
+            logger.error(f"Error closing CCXT exchange connection: {e}")
+
+# Example Usage (run within an asyncio event loop):
+async def main_exchange_api_example():
+    if not settings:
+        print("Settings could not be loaded. Exiting example.")
+        return
+
+    exchange_api = ExchangeAPI(exchange_id='kraken')
+
+    # Fetch balance
+    balance = await exchange_api.fetch_balance()
+    if balance:
+        # Log specific free balances if needed, e.g., USD, BTC
+        logger.info(f"Free USD Balance: {balance.get('USD', {}).get('free', 0)}")
+        logger.info(f"Free BTC Balance: {balance.get('BTC', {}).get('free', 0)}")
+    
+    # Example: Place a practice order (simulated if keys are dummy)
+    # Ensure the symbol and amounts are reasonable for testing.
+    # Kraken typically requires minimum order sizes. E.g., BTC/USD might need > 0.0001 BTC
+    # This will likely fail with "InsufficientFunds" or "InvalidOrder" on a live account without funds or proper setup.
+    
+    # For actual testing with dummy keys, the simulation path in create_order will be hit.
+    # If you have paper trading keys, replace the placeholders in secrets.ini.
+    
+    # target_symbol = settings.default_symbol # e.g. 'BTC/USD'
+    # order_to_place = await exchange_api.create_order(
+    #     symbol=target_symbol,
+    #     order_type=OrderType.LIMIT, # Use LIMIT to avoid unexpected fills with market orders
+    #     side=OrderSide.BUY,
+    #     amount=0.0001,  # Example small amount, check Kraken's minimums
+    #     price=15000.0   # Example very low price for a limit buy to ensure it doesn't fill immediately
+    # )
+
+    # if order_to_place:
+    #     logger.info(f"Practice order placed/simulated: ID {order_to_place.id}, Status {order_to_place.status}")
+        
+    #     # Fetch the status of this specific order
+    #     await asyncio.sleep(2) # Give some time for order to register (if live)
+    #     fetched_order_status = await exchange_api.fetch_order(order_to_place.id, order_to_place.symbol)
+    #     if fetched_order_status:
+    #         logger.info(f"Fetched status for order {fetched_order_status.id}: {fetched_order_status.status}")
+
+    #     # Try to cancel the order
+    #     # if order_to_place.status == 'open' or "sim_" in order_to_place.id: # Only cancel if open or simulated
+    #     #     logger.info(f"Attempting to cancel order: {order_to_place.id}")
+    #     #     cancel_success = await exchange_api.cancel_order(order_to_place.id, order_to_place.symbol)
+    #     #     logger.info(f"Cancellation request for order {order_to_place.id} successful: {cancel_success}")
+    # else:
+    #     logger.warning("Practice order placement failed or was not attempted.")
+
+    await exchange_api.close()
+
+if __name__ == '__main__':
+    # Standalone test
+    # from kamikaze_komodo.config.settings import Config
+    # settings_instance = Config(config_file='../config/config.ini', secrets_file='../config/secrets.ini')
+    # global settings
+    # settings = settings_instance
+    # if settings:
+    #    asyncio.run(main_exchange_api_example())
+    # else:
+    #    print("Failed to load settings for standalone exchange_api example.")
+    pass
+</code>
+
+exchange_interaction/__init__.py:
+<code>
+# kamikaze_komodo/exchange_interaction/__init__.py
+# This file makes the 'exchange_interaction' directory a Python package.
+</code>
+
+strategy_framework/base_strategy.py:
+<code>
+# kamikaze_komodo/strategy_framework/base_strategy.py
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+import pandas as pd
+from kamikaze_komodo.core.enums import SignalType
+from kamikaze_komodo.core.models import BarData
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+class BaseStrategy(ABC):
+    """
+    Abstract base class for all trading strategies.
+    """
+    def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.params = params if params is not None else {}
+        self.current_position: Optional[SignalType] = None # None, LONG, SHORT
+        self.data_history = pd.DataFrame() # To store historical data for calculations
+        logger.info(f"Initialized BaseStrategy for {symbol} ({timeframe}) with params: {self.params}")
+
+    @abstractmethod
+    def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+        """
+        Generates trading signals based on the provided historical data.
+        This method should be implemented by concrete strategy classes.
+        It is typically called once during backtesting setup or for historical analysis.
+
+        Args:
+            data (pd.DataFrame): DataFrame with historical OHLCV data, indexed by timestamp.
+                                 Expected columns: 'open', 'high', 'low', 'close', 'volume'.
+
+        Returns:
+            pd.Series: A Pandas Series indexed by timestamp, containing SignalType values.
+        """
+        pass
+
+    @abstractmethod
+    def on_bar_data(self, bar_data: BarData) -> Optional[SignalType]:
+        """
+        Processes a new bar of data and decides on a trading action.
+        This method is typically called for each new data point in a live or simulated environment.
+
+        Args:
+            bar_data (BarData): The new BarData object.
+
+        Returns:
+            Optional[SignalType]: A signal (LONG, SHORT, HOLD, CLOSE_LONG, CLOSE_SHORT) or None if no action.
+        """
+        pass
+        
+    def update_data_history(self, new_bar_data: BarData):
+        """
+        Appends new bar data to the internal history.
+        This should be called before on_bar_data if the strategy relies on an updating DataFrame.
+        """
+        new_row = pd.DataFrame([{
+            'open': new_bar_data.open,
+            'high': new_bar_data.high,
+            'low': new_bar_data.low,
+            'close': new_bar_data.close,
+            'volume': new_bar_data.volume
+        }], index=[new_bar_data.timestamp])
+        
+        self.data_history = pd.concat([self.data_history, new_row])
+        # Optional: Keep only a certain number of recent rows to manage memory
+        # max_history_length = self.params.get('max_history_length', 1000)
+        # if len(self.data_history) > max_history_length:
+        #     self.data_history = self.data_history.iloc[-max_history_length:]
+
+    def get_parameters(self) -> Dict[str, Any]:
+        """Returns the parameters of the strategy."""
+        return self.params
+
+    def set_parameters(self, params: Dict[str, Any]):
+        """Updates the parameters of the strategy."""
+        self.params.update(params)
+        logger.info(f"Strategy {self.__class__.__name__} parameters updated: {self.params}")
+
+    @property
+    def name(self) -> str:
+        return self.__class__.__name__
+</code>
+
+strategy_framework/strategy_manager.py:
+<code>
+# kamikaze_komodo/strategy_framework/strategy_manager.py
+from typing import List, Dict, Any
+from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
+from kamikaze_komodo.core.models import BarData
+from kamikaze_komodo.core.enums import SignalType
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+class StrategyManager:
+    """
+    Manages the loading, initialization, and execution of trading strategies.
+    """
+    def __init__(self):
+        self.strategies: List[BaseStrategy] = []
+        logger.info("StrategyManager initialized.")
+
+    def add_strategy(self, strategy: BaseStrategy):
+        """Adds a strategy instance to the manager."""
+        if not isinstance(strategy, BaseStrategy):
+            logger.error("Attempted to add an invalid strategy object.")
+            raise ValueError("Strategy must be an instance of BaseStrategy.")
+        
+        self.strategies.append(strategy)
+        logger.info(f"Strategy '{strategy.name}' for {strategy.symbol} ({strategy.timeframe}) added to StrategyManager.")
+
+    def remove_strategy(self, strategy_name: str, symbol: str, timeframe: str):
+        """Removes a strategy by its name, symbol, and timeframe."""
+        initial_count = len(self.strategies)
+        self.strategies = [
+            s for s in self.strategies 
+            if not (s.name == strategy_name and s.symbol == symbol and s.timeframe == timeframe)
+        ]
+        if len(self.strategies) < initial_count:
+            logger.info(f"Strategy '{strategy_name}' for {symbol} ({timeframe}) removed.")
+        else:
+            logger.warning(f"Strategy '{strategy_name}' for {symbol} ({timeframe}) not found for removal.")
+
+
+    def load_strategies_from_config(self, config: Dict[str, Any]):
+        """
+        Loads strategies based on a configuration dictionary.
+        This is a placeholder for a more dynamic loading mechanism.
+        For now, strategies are added manually or via specific calls.
+        """
+        # Example:
+        # for strategy_config in config.get('strategies', []):
+        #     strategy_class = resolve_strategy_class(strategy_config['name']) # Utility to get class from name
+        #     params = strategy_config.get('params', {})
+        #     symbol = strategy_config.get('symbol')
+        #     timeframe = strategy_config.get('timeframe')
+        #     if strategy_class and symbol and timeframe:
+        #         self.add_strategy(strategy_class(symbol, timeframe, params))
+        logger.warning("load_strategies_from_config is a placeholder and not fully implemented.")
+        pass
+
+    def on_bar_data_all(self, bar_data: BarData) -> Dict[str, SignalType]:
+        """
+        Distributes new bar data to all relevant strategies and collects signals.
+        A strategy is relevant if the bar_data.symbol and bar_data.timeframe match.
+
+        Returns:
+            Dict[str, SignalType]: A dictionary where keys are strategy identifiers
+                                   (e.g., "EWMACStrategy_BTC/USD_1h") and values are signals.
+        """
+        signals_from_strategies: Dict[str, SignalType] = {}
+        for strategy in self.strategies:
+            if strategy.symbol == bar_data.symbol and strategy.timeframe == bar_data.timeframe:
+                signal = strategy.on_bar_data(bar_data)
+                if signal: # Only record actual signals, not None or HOLD if not meaningful here
+                    strategy_id = f"{strategy.name}_{strategy.symbol.replace('/', '')}_{strategy.timeframe}"
+                    signals_from_strategies[strategy_id] = signal
+                    logger.debug(f"Signal from {strategy_id}: {signal.name}")
+        return signals_from_strategies
+
+    def get_all_strategies(self) -> List[BaseStrategy]:
+        return self.strategies
+
+# Example Usage (Conceptual)
+if __name__ == '__main__':
+    from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
+    from kamikaze_komodo.config.settings import settings # Assuming settings are loaded
+
+    if settings:
+        manager = StrategyManager()
+        
+        # Create and add a strategy instance
+        ewmac_params = {
+            'short_window': settings.ewmac_short_window,
+            'long_window': settings.ewmac_long_window
+        }
+        ewmac_btc_1h = EWMACStrategy(symbol="BTC/USD", timeframe="1h", params=ewmac_params)
+        manager.add_strategy(ewmac_btc_1h)
+
+        # Simulate receiving bar data
+        # In a real system, this BarData would come from DataFetcher
+        from datetime import datetime, timezone
+        example_bar = BarData(
+            timestamp=datetime.now(timezone.utc),
+            open=40000, high=40500, low=39800, close=40200, volume=100,
+            symbol="BTC/USD", timeframe="1h"
+        )
+
+        # To actually get a signal, the strategy needs historical data first.
+        # This is a simplified call. `ewmac_btc_1h.update_data_history(bar)` would need to be called many times first.
+        # For a single bar without history, it will likely return HOLD or an error if not enough data.
+        # signals = manager.on_bar_data_all(example_bar)
+        # logger.info(f"Signals received: {signals}")
+        logger.info("StrategyManager example completed. For meaningful signals, strategies need historical data.")
+    else:
+        logger.error("Settings not loaded, cannot run StrategyManager example.")
+</code>
+
+strategy_framework/__init__.py:
+<code>
+# kamikaze_komodo/strategy_framework/__init__.py
+# This file makes the 'strategy_framework' directory a Python package.
+</code>
+
+strategy_framework/strategies/ewmac.py:
+<code>
+# kamikaze_komodo/strategy_framework/strategies/ewmac.py
+import pandas as pd
+import pandas_ta as ta # For EMA calculations
+from typing import Dict, Any, Optional
+from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
+from kamikaze_komodo.core.enums import SignalType
+from kamikaze_komodo.core.models import BarData
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+class EWMACStrategy(BaseStrategy):
+    """
+    Exponential Weighted Moving Average Crossover (EWMAC) Strategy.
+    Generates LONG signals when the short-term EMA crosses above the long-term EMA.
+    Generates SHORT signals when the short-term EMA crosses below the long-term EMA.
+    (Note: For this basic implementation, SHORT signals might imply selling a long position
+     or going short if the system supports it. For now, we'll focus on LONG and CLOSE_LONG.)
+    """
+    def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
+        super().__init__(symbol, timeframe, params)
+        self.short_window = self.params.get('short_window', 12)
+        self.long_window = self.params.get('long_window', 26)
+        
+        if not isinstance(self.short_window, int) or not isinstance(self.long_window, int):
+            raise ValueError("EWMACStrategy: 'short_window' and 'long_window' parameters must be integers.")
+        if self.short_window >= self.long_window:
+            raise ValueError("EWMACStrategy: 'short_window' must be less than 'long_window'.")
+            
+        logger.info(
+            f"Initialized EWMACStrategy for {symbol} ({timeframe}) "
+            f"with Short EMA: {self.short_window}, Long EMA: {self.long_window}"
+        )
+        self.current_position: Optional[SignalType] = None # None, LONG (no shorting in this simple version)
+
+
+    def _calculate_emas(self, data_df: pd.DataFrame) -> pd.DataFrame:
+        """Calculates EMAs and adds them to the DataFrame."""
+        if data_df.empty or len(data_df) < self.long_window:
+            # logger.warning(f"Not enough data ({len(data_df)}) to calculate EMAs requiring {self.long_window} periods.")
+            return data_df # Return original df if not enough data
+
+        df = data_df.copy()
+        df[f'ema_short'] = ta.ema(df['close'], length=self.short_window)
+        df[f'ema_long'] = ta.ema(df['close'], length=self.long_window)
+        return df
+
+    def generate_signals(self, data: pd.DataFrame) -> pd.Series:
+        """
+        Generates trading signals based on historical data.
+        This is typically used for backtesting over a full dataset.
+        """
+        if data.empty or len(data) < self.long_window:
+            logger.warning(f"Not enough historical data ({len(data)}) for EWMAC signals generation. Need at least {self.long_window} periods.")
+            return pd.Series(index=data.index, dtype='object') # Return empty signals
+
+        df_with_emas = self._calculate_emas(data)
+        signals = pd.Series(index=df_with_emas.index, dtype='object') # Using object to store Enum or None
+
+        # Conditions for signals
+        # Golden Cross (Buy Signal): Short EMA crosses above Long EMA
+        buy_condition = (df_with_emas['ema_short'] > df_with_emas['ema_long']) & \
+                        (df_with_emas['ema_short'].shift(1) <= df_with_emas['ema_long'].shift(1))
+        
+        # Death Cross (Sell Signal): Short EMA crosses below Long EMA
+        sell_condition = (df_with_emas['ema_short'] < df_with_emas['ema_long']) & \
+                         (df_with_emas['ema_short'].shift(1) >= df_with_emas['ema_long'].shift(1))
+
+        # Apply signals based on conditions
+        # This simple version doesn't track state (current position) across the Series directly for generate_signals.
+        # It just marks the crossover points. A backtester would interpret these.
+        signals[buy_condition] = SignalType.LONG
+        signals[sell_condition] = SignalType.CLOSE_LONG # For simplicity, a sell condition means close any long.
+
+        # To avoid look-ahead bias, signals should be actionable on the next bar's open.
+        # However, for simplicity in this `generate_signals`, we mark the bar where crossover happens.
+        # The backtester should handle how these signals are translated into trades (e.g., next bar open).
+
+        # Fill forward HOLD signals after an initial signal, until a counter-signal.
+        # This part is more complex for generate_signals and better handled by a stateful on_bar_data or backtester logic.
+        # For now, generate_signals will just mark the crossover events.
+        # If you need HOLD signals here, you'd iterate and maintain state:
+        # current_sig_state = SignalType.HOLD
+        # for i in range(len(df_with_emas)):
+        #     if buy_condition.iloc[i]:
+        #         current_sig_state = SignalType.LONG
+        #     elif sell_condition.iloc[i]:
+        #         current_sig_state = SignalType.CLOSE_LONG # Or HOLD if no position
+        #     signals.iloc[i] = current_sig_state if current_sig_state != SignalType.CLOSE_LONG else SignalType.HOLD
+        # This requires careful state management.
+
+        logger.info(f"Generated EWMAC signals. Longs: {signals.eq(SignalType.LONG).sum()}, CloseLongs: {signals.eq(SignalType.CLOSE_LONG).sum()}")
+        return signals
+
+
+    def on_bar_data(self, bar_data: BarData) -> Optional[SignalType]:
+        """
+        Processes a new bar of data and decides on a trading action for live/simulated trading.
+        This method maintains the state of `self.current_position`.
+        """
+        self.update_data_history(bar_data) # Add new bar to history
+
+        if len(self.data_history) < self.long_window + 1: # Need enough data for current + previous EMAs
+            # logger.debug(f"Not enough data in history ({len(self.data_history)}) for EWMAC on_bar_data. Need at least {self.long_window + 1}.")
+            return SignalType.HOLD # Not enough data to make a decision
+
+        # Calculate EMAs on the current history
+        df_with_emas = self._calculate_emas(self.data_history)
+
+        if df_with_emas.empty or 'ema_short' not in df_with_emas.columns or 'ema_long' not in df_with_emas.columns or len(df_with_emas) < 2:
+            # logger.debug("EMA calculation failed or not enough data points after EMA calculation.")
+            return SignalType.HOLD
+
+        # Get the latest two values for crossover detection
+        latest_ema_short = df_with_emas['ema_short'].iloc[-1]
+        prev_ema_short = df_with_emas['ema_short'].iloc[-2]
+        latest_ema_long = df_with_emas['ema_long'].iloc[-1]
+        prev_ema_long = df_with_emas['ema_long'].iloc[-2]
+
+        if pd.isna(latest_ema_short) or pd.isna(prev_ema_short) or \
+           pd.isna(latest_ema_long) or pd.isna(prev_ema_long):
+            # logger.debug("EMA values are NaN, cannot make a decision.")
+            return SignalType.HOLD # EMAs not yet calculated (NaNs during warmup)
+
+        signal = SignalType.HOLD # Default action
+
+        # Entry Condition (Golden Cross)
+        is_golden_cross = latest_ema_short > latest_ema_long and prev_ema_short <= prev_ema_long
+        if is_golden_cross and self.current_position != SignalType.LONG:
+            signal = SignalType.LONG
+            self.current_position = SignalType.LONG
+            logger.info(f"{bar_data.timestamp} - EWMAC LONG signal for {self.symbol}. Short EMA: {latest_ema_short:.2f}, Long EMA: {latest_ema_long:.2f}")
+            return signal
+
+        # Exit Condition (Death Cross)
+        is_death_cross = latest_ema_short < latest_ema_long and prev_ema_short >= prev_ema_long
+        if is_death_cross and self.current_position == SignalType.LONG:
+            signal = SignalType.CLOSE_LONG
+            self.current_position = None # Position closed
+            logger.info(f"{bar_data.timestamp} - EWMAC CLOSE_LONG signal for {self.symbol}. Short EMA: {latest_ema_short:.2f}, Long EMA: {latest_ema_long:.2f}")
+            return signal
+            
+        # If already in a position and no exit signal, hold.
+        if self.current_position == SignalType.LONG:
+            return SignalType.HOLD
+
+        return signal # Default to HOLD if no other conditions met
+</code>
+
+strategy_framework/strategies/__init__.py:
+<code>
+# kamikaze_komodo/strategy_framework/strategies/__init__.py
+# This file makes the 'strategies' directory a Python package.
+</code>
+
+testing/testBrowserUse.py:
+<code>
+import asyncio
+from dotenv import load_dotenv
+from browser_use import Agent
+from langchain_ollama import ChatOllama
+
+# Load environment variables (optional for local Ollama, but good practice)
+load_dotenv()
+
+async def research_bitcoin_sentiment():
+    """
+    Uses browser-use with Ollama (gemma3:12b) to research
+    market sentiment and news about Bitcoin.
+    """
+    print("Initializing Ollama LLM (gemma3:12b)...")
+    try:
+        # Initialize the Ollama LLM
+        # You can adjust num_ctx (context window size) if needed.
+        # Larger values allow for more context but consume more resources.
+        llm = ChatOllama(model="gemma3:12b", num_ctx=128000) # gemma3 models often have 8k context
+        print("Ollama LLM initialized.")
+    except Exception as e:
+        print(f"Error initializing Ollama LLM: {e}")
+        print("Please ensure Ollama is running and the model 'gemma3:12b' is pulled.")
+        return
+
+    # Define the research task
+    task = (
+        "Research the current market sentiment surrounding Bitcoin. "
+        "Find 2-3 recent news articles (from the last week if possible) that discuss Bitcoin's price, adoption, or regulatory news. "
+        "Summarize the overall sentiment (e.g., bullish, bearish, neutral) and list the headlines and sources of the news articles found. "
+        "Focus on reputable financial news sources or crypto-specific news sites."
+        "Do not visit coindesk and do not stay on a website for more than 4 steps"
+    )
+
+    print(f"\nStarting browser-use agent with task: '{task}'")
+    print("This might take a few minutes depending on the complexity and web page loading times...")
+
+    try:
+        # Create the browser-use Agent
+        # use_vision=False is a good default if the model doesn't explicitly support it well
+        # or if the task doesn't require image understanding.
+        # For gemma3:12b, it's primarily text-based.
+        agent = Agent(
+            llm=llm,
+            task=task,
+            use_vision=False,
+            # verbose=True, # For more detailed logging from browser-use
+        )
+
+        # Run the agent
+        result = await agent.run(max_steps=50) 
+
+        print("\n--- Research Complete ---")
+        if isinstance(result, str):
+            print(result)
+        elif isinstance(result, dict) and 'output' in result:
+            print(result['output'])
+        else:
+            print("Result from agent:")
+            print(result)
+
+    except Exception as e:
+        print(f"\nAn error occurred while running the browser-use agent: {e}")
+        print("Possible issues:")
+        print("- Ollama server not responding or model not loaded correctly.")
+        print("- Network connectivity problems for the browser.")
+        print("- The task might be too complex or the websites visited might be problematic for automation.")
+
+if __name__ == "__main__":
+    # Check if Ollama is running and model is available (basic check)
+    try:
+        print("Checking Ollama status and model availability...")
+        ollama_client_check = ChatOllama(model="gemma3:12b")
+        ollama_client_check.invoke("Hello") # Simple test invocation
+        print("Ollama and gemma3:12b seem to be accessible.")
+        del ollama_client_check
+    except Exception as e:
+        print(f"Pre-check failed: Could not connect to Ollama or load gemma3:12b: {e}")
+        print("Please ensure Ollama is running and you have pulled 'gemma3:12b' (ollama pull gemma3:12b).")
+        exit(1)
+
+    asyncio.run(research_bitcoin_sentiment())
+</code>
+
+testing/testOllama.py:
+<code>
+import ollama
+
+def chat_with_ollama():
+    """
+    Allows the user to interact with a specified Ollama model.
+    """
+    # --- Configuration ---
+    # You can change the model_name to any model you have available in Ollama.
+    # Run 'ollama list' in your terminal to see available models.
+    model_name = 'gemma3:12b' # Example: replace if needed
+
+    print(f"Starting chat with Ollama model: {model_name}")
+    print("Type 'quit', 'exit', or 'bye' to end the chat.")
+    print("-" * 30)
+
+    # --- Initialize conversation history ---
+    # Ollama's chat endpoint can maintain context if you pass the history.
+    messages = []
+
+    while True:
+        try:
+            user_input = input("You: ")
+            if user_input.lower() in ['quit', 'exit', 'bye']:
+                print("Exiting chat. Goodbye! 👋")
+                break
+
+            # Add user's message to history
+            messages.append({'role': 'user', 'content': user_input})
+
+            # --- Send prompt to Ollama and stream response ---
+            # stream=True provides a more interactive experience as tokens arrive.
+            # stream=False will wait for the full response.
+            response_stream = ollama.chat(
+                model=model_name,
+                messages=messages,
+                stream=True
+            )
+
+            print(f"AI ({model_name}): ", end="", flush=True)
+            assistant_response = ""
+            for chunk in response_stream:
+                if 'message' in chunk and 'content' in chunk['message']:
+                    token = chunk['message']['content']
+                    print(token, end="", flush=True)
+                    assistant_response += token
+                # Check for the 'done' status if not using stream=True,
+                # or to handle the end of a streamed response.
+                if chunk.get('done'):
+                    print() # Newline after the full response
+                    # Add assistant's full response to history
+                    messages.append({'role': 'assistant', 'content': assistant_response})
+                    break
+            
+            if not assistant_response: # If stream ended without content (e.g., error)
+                print("\nNo response from model or stream ended.")
+                # Optionally remove the last user message if there was no valid response
+                if messages and messages[-1]['role'] == 'user':
+                    messages.pop()
+
+
+        except Exception as e:
+            print(f"\nAn error occurred: {e}")
+            # You might want to clear messages or handle the error more gracefully
+            break
+
+if __name__ == '__main__':
+    # --- Check if Ollama is running and the model is available ---
+    try:
+        client = ollama.Client()
+        client.list() # Simple check to see if server is reachable
+        print("Successfully connected to Ollama.")
+        
+        # You can add a check here to see if model_name exists if desired,
+        # though ollama.chat will also error out if it doesn't.
+        
+    except Exception as e:
+        print(f"Error connecting to Ollama or Ollama server not running: {e}")
+        print("Please ensure the Ollama application is running.")
+        exit()
+        
+    chat_with_ollama()
+</code>
+

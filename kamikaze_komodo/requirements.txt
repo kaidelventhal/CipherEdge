@@ -1,0 +1,45 @@
+# kamikaze_komodo/requirements.txt
+
+# Core & Data Handling
+pydantic>=2.0
+python-dotenv>=0.19
+ccxt>=4.0 # Check latest stable version
+pandas>=1.5 # Check latest stable version
+numpy>=1.23 # Check latest stable version
+pandas-ta>=0.3.14b # For technical indicators like EMA in strategies
+# For database (SQLite is built-in)
+# If using InfluxDB or QuestDB later, add their clients:
+# influxdb-client
+# questdb
+
+# Async operations
+aiohttp>=3.8 # Often a dependency of ccxt async or useful for other async http
+
+# Logging (built-in, but listed for completeness of thought)
+
+# Configuration (configparser is built-in)
+
+# Testing (for future phases)
+# pytest
+# pytest-asyncio
+
+# For Phase 4+ (AI/ML)
+# langchain
+# ollama
+# beautifulsoup4
+# newspaper3k
+# feedparser
+# jeepney # For D-Bus if needed
+
+# For Phase 5+ (Advanced ML)
+# scikit-learn
+# torch # with ROCm support if applicable: check PyTorch website for install instructions
+# tensorflow # with ROCm support if applicable: check TensorFlow website
+# lightgbm
+# xgboost
+
+# For Phase 8+ (Scheduling)
+# APScheduler
+
+# Make sure to install Playwright browsers if using browser-use later:
+# playwright install chromium --with-deps
