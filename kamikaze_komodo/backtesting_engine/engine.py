@@ -1,259 +1,332 @@
 # kamikaze_komodo/backtesting_engine/engine.py
+# Significantly updated to integrate PositionSizer and StopManager
+# And to handle sentiment data (conceptual for now)
+
 import pandas as pd
-from typing import List, Dict, Any, Optional
-from kamikaze_komodo.core.models import BarData, Trade, Order # Order might not be fully used in basic backtest
+from typing import List, Dict, Any, Optional, Tuple
+from kamikaze_komodo.core.models import BarData, Trade, Order # Order not fully used
 from kamikaze_komodo.core.enums import SignalType, OrderSide, TradeResult
 from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
 from kamikaze_komodo.app_logger import get_logger
 from datetime import datetime, timezone
 
+# Phase 3 imports
+from kamikaze_komodo.risk_control_module.position_sizer import BasePositionSizer, FixedFractionalPositionSizer # Default
+from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, PercentageStopManager # Default
+from kamikaze_komodo.portfolio_constructor.asset_allocator import BaseAssetAllocator # For future use
+
 logger = get_logger(__name__)
 
 class BacktestingEngine:
-    """
-    A basic backtesting engine.
-    Iterates through historical data, applies strategy logic, and simulates trades.
-    """
     def __init__(
         self,
-        data_feed_df: pd.DataFrame, # Expects DataFrame with OHLCV columns, indexed by timestamp
+        data_feed_df: pd.DataFrame,
         strategy: BaseStrategy,
         initial_capital: float = 10000.0,
-        commission_bps: float = 0.0, # Commission in basis points (e.g., 10 bps = 0.1% = 0.001)
-        stop_loss_pct: Optional[float] = None, # e.g., 0.02 for 2%
-        take_profit_pct: Optional[float] = None # e.g., 0.05 for 5%
+        commission_bps: float = 0.0, # e.g., 10 bps = 0.1%
+        position_sizer: Optional[BasePositionSizer] = None,
+        stop_manager: Optional[BaseStopManager] = None,
+        # For Phase 4: sentiment data
+        sentiment_data_df: Optional[pd.DataFrame] = None # Timestamp-indexed series/df with sentiment scores
     ):
-        if data_feed_df.empty:
-            raise ValueError("Data feed DataFrame cannot be empty.")
+        if data_feed_df.empty: raise ValueError("Data feed DataFrame cannot be empty.")
         if not isinstance(data_feed_df.index, pd.DatetimeIndex):
-            raise ValueError("Data feed DataFrame must be indexed by timestamp (pd.DatetimeIndex).")
+            raise ValueError("Data feed DataFrame must be indexed by pd.DatetimeIndex.")
         
-        self.data_feed_df = data_feed_df.sort_index() # Ensure data is chronological
+        self.data_feed_df = data_feed_df.sort_index()
         self.strategy = strategy
         self.initial_capital = initial_capital
-        self.commission_rate = commission_bps / 10000.0 # Convert bps to a rate (e.g., 10bps -> 0.001)
-        self.stop_loss_pct = stop_loss_pct
-        self.take_profit_pct = take_profit_pct
+        self.commission_rate = commission_bps / 10000.0
+
+        # Initialize Risk and Portfolio Components (Phase 3)
+        self.position_sizer = position_sizer if position_sizer else FixedFractionalPositionSizer(fraction=0.1) # Default 10% equity allocation
+        self.stop_manager = stop_manager if stop_manager else PercentageStopManager(stop_loss_pct=None, take_profit_pct=None) # Default no SL/TP from engine
+        
+        # Phase 4: Sentiment Data
+        self.sentiment_data_df = sentiment_data_df # Expects 'timestamp' index and 'sentiment_score' column
+        if self.sentiment_data_df is not None and not self.sentiment_data_df.empty:
+            if not isinstance(self.sentiment_data_df.index, pd.DatetimeIndex):
+                logger.warning("Sentiment data DataFrame must be indexed by pd.DatetimeIndex. Sentiment will not be used.")
+                self.sentiment_data_df = None
+            else: # Ensure timezone consistency (UTC)
+                if self.sentiment_data_df.index.tz is None:
+                    self.sentiment_data_df.index = self.sentiment_data_df.index.tz_localize('UTC')
+                else:
+                    self.sentiment_data_df.index = self.sentiment_data_df.index.tz_convert('UTC')
+                logger.info(f"Sentiment data loaded with {len(self.sentiment_data_df)} entries.")
+
 
         self.portfolio_history: List[Dict[str, Any]] = []
         self.trades_log: List[Trade] = []
         
-        self.current_capital = initial_capital
-        self.current_position_size = 0.0 # In units of the asset
-        self.current_position_side: Optional[OrderSide] = None
-        self.entry_price: Optional[float] = None
+        self.current_cash = initial_capital
+        self.current_asset_value = 0.0 # Mark-to-market value of assets held
+        self.current_portfolio_value = initial_capital # Total equity (cash + asset_value)
+        
+        self.active_trade: Optional[Trade] = None # Stores the currently open trade object
         self.trade_id_counter = 0
 
         logger.info(
             f"BacktestingEngine initialized for strategy '{strategy.name}' on symbol '{strategy.symbol}'. "
             f"Initial Capital: ${initial_capital:,.2f}, Commission: {commission_bps} bps."
         )
-        if stop_loss_pct: logger.info(f"Stop Loss: {stop_loss_pct*100:.2f}%")
-        if take_profit_pct: logger.info(f"Take Profit: {take_profit_pct*100:.2f}%")
+        logger.info(f"Position Sizer: {self.position_sizer.__class__.__name__}")
+        logger.info(f"Stop Manager: {self.stop_manager.__class__.__name__}")
+        if self.sentiment_data_df is not None and not self.sentiment_data_df.empty :
+            logger.info("Sentiment data will be used in this backtest.")
 
 
     def _get_next_trade_id(self) -> str:
         self.trade_id_counter += 1
         return f"trade_{self.trade_id_counter:05d}"
 
+    def _update_portfolio_value(self, current_bar_close_price: Optional[float] = None):
+        """Updates current_asset_value and current_portfolio_value."""
+        if self.active_trade and current_bar_close_price is not None:
+            self.current_asset_value = self.active_trade.amount * current_bar_close_price
+        else:
+            self.current_asset_value = 0.0
+        self.current_portfolio_value = self.current_cash + self.current_asset_value
+
+
     def _execute_trade(
         self, 
         signal_type: SignalType, 
         timestamp: datetime, 
-        price: float # Execution price (e.g., current bar's close or next bar's open)
+        price: float, # Execution price
+        current_bar_for_atr_calc: Optional[BarData] = None # For ATR based sizer/stop
     ):
-        """Simulates executing a trade based on the signal."""
         commission_cost = 0.0
+        trade_executed = False
 
         # --- POSITION ENTRY ---
-        if signal_type == SignalType.LONG and self.current_position_side is None:
-            # Simple position sizing: use all available capital (for this basic engine)
-            # A more advanced engine would use a PositionSizer module.
-            if self.current_capital <= 0:
-                logger.warning(f"{timestamp} - Cannot enter LONG trade for {self.strategy.symbol}. No capital available.")
+        if signal_type == SignalType.LONG and self.active_trade is None:
+            # Use PositionSizer
+            atr_value_for_sizing = current_bar_for_atr_calc.atr if current_bar_for_atr_calc and hasattr(current_bar_for_atr_calc, 'atr') else None
+            
+            position_size_units = self.position_sizer.calculate_size(
+                symbol=self.strategy.symbol,
+                current_price=price,
+                available_capital=self.current_cash,
+                current_portfolio_value=self.current_portfolio_value,
+                latest_bar=current_bar_for_atr_calc, # Pass current bar for potential ATR calc by sizer
+                atr_value=atr_value_for_sizing # Pass ATR if strategy calculated it
+            )
+
+            if position_size_units is None or position_size_units <= 0:
+                logger.debug(f"{timestamp} - Cannot enter LONG trade for {self.strategy.symbol}. PositionSizer returned no size or zero size.")
                 return
 
-            asset_cost_without_commission = self.current_capital 
-            self.current_position_size = asset_cost_without_commission / price 
+            cost_of_assets = position_size_units * price
+            commission_cost = cost_of_assets * self.commission_rate
 
-            commission_cost = asset_cost_without_commission * self.commission_rate
+            if cost_of_assets + commission_cost > self.current_cash:
+                logger.warning(f"{timestamp} - Insufficient cash for LONG trade on {self.strategy.symbol}. Need {cost_of_assets + commission_cost:.2f}, have {self.current_cash:.2f}. Reducing size or skipping.")
+                # Optionally, try to resize with available cash, or just skip
+                adjusted_size_units = (self.current_cash - commission_cost) / price # Simplified adjustment attempt
+                if adjusted_size_units * price * (1 + self.commission_rate) > self.current_cash or adjusted_size_units <= 0:
+                     logger.warning(f"{timestamp} - Still insufficient cash after adjustment. Skipping trade.")
+                     return
+                position_size_units = adjusted_size_units
+                cost_of_assets = position_size_units * price
+                commission_cost = cost_of_assets * self.commission_rate
 
-            # Reduce cash by the total cost (assets + commission)
-            self.current_capital -= asset_cost_without_commission 
-            self.current_capital -= commission_cost
 
-            self.current_position_side = OrderSide.BUY
-            self.entry_price = price
+            self.current_cash -= (cost_of_assets + commission_cost)
             
-            # Create a new trade record (still open)
-            trade = Trade(
+            # ATR at entry for ATRStopManager (if strategy provides it on BarData or calculates it)
+            atr_at_entry = current_bar_for_atr_calc.atr if current_bar_for_atr_calc and current_bar_for_atr_calc.atr else None
+
+            self.active_trade = Trade(
                 id=self._get_next_trade_id(),
                 symbol=self.strategy.symbol,
-                entry_order_id=f"entry_{self.trade_id_counter}", # Simulated order ID
+                entry_order_id=f"entry_{self.trade_id_counter}",
                 side=OrderSide.BUY,
-                entry_price=self.entry_price,
-                amount=self.current_position_size,
+                entry_price=price,
+                amount=position_size_units,
                 entry_timestamp=timestamp,
-                commission=commission_cost # Initial commission for entry
+                commission=commission_cost,
+                custom_fields={"atr_at_entry": atr_at_entry} if atr_at_entry else {}
             )
-            self.trades_log.append(trade)
+            self._update_portfolio_value(price) # Update portfolio value with new asset holding
             logger.info(
-                f"{timestamp} - EXECUTE LONG: {self.current_position_size:.4f} {self.strategy.symbol} "
-                f"@ ${price:.2f}. Capital: ${self.current_capital:.2f}. Comm: ${commission_cost:.2f}."
+                f"{timestamp} - EXECUTE LONG: {position_size_units:.6f} {self.strategy.symbol} @ ${price:.2f}. "
+                f"Cost: ${cost_of_assets:.2f}, Comm: ${commission_cost:.2f}. Cash Left: ${self.current_cash:.2f}. Equity: ${self.current_portfolio_value:.2f}"
             )
+            trade_executed = True
 
-        # --- POSITION EXIT ---
-        elif signal_type == SignalType.CLOSE_LONG and self.current_position_side == OrderSide.BUY:
-            if self.current_position_size == 0 or self.entry_price is None:
-                logger.warning(f"{timestamp} - Received CLOSE_LONG but no open BUY position or entry price for {self.strategy.symbol}.")
-                return
-
-            exit_value = self.current_position_size * price # Gross proceeds from sale
+        # --- POSITION EXIT (e.g. from strategy signal) ---
+        elif signal_type == SignalType.CLOSE_LONG and self.active_trade is not None and self.active_trade.side == OrderSide.BUY:
+            exit_value = self.active_trade.amount * price
             commission_cost = exit_value * self.commission_rate
 
-            # PnL calculation should be based on entry_price vs exit_price for the amount traded
-            # PnL = (exit_price - self.entry_price) * self.current_position_size - commission_cost_entry - commission_cost_exit
-            # The self.trades_log already stores entry commission.
+            self.current_cash += (exit_value - commission_cost)
+            
+            pnl_for_this_trade = (price - self.active_trade.entry_price) * self.active_trade.amount - self.active_trade.commission - commission_cost
+            initial_trade_value = self.active_trade.entry_price * self.active_trade.amount
+            pnl_percentage = (pnl_for_this_trade / initial_trade_value) * 100 if initial_trade_value != 0 else 0
 
-            # Add gross proceeds to cash, then deduct exit commission
-            self.current_capital += exit_value 
-            self.current_capital -= commission_cost
-
-            # Update the last trade log
-            if self.trades_log:
-                last_trade = self.trades_log[-1]
-                if last_trade.exit_price is None:
-                    # Calculate PnL for this specific trade
-                    pnl_for_this_trade = (price - last_trade.entry_price) * last_trade.amount - last_trade.commission - commission_cost
-                    pnl_percentage_for_this_trade = (pnl_for_this_trade / (last_trade.entry_price * last_trade.amount)) * 100 if (last_trade.entry_price * last_trade.amount) != 0 else 0
-
-                    last_trade.exit_price = price
-                    last_trade.exit_timestamp = timestamp
-                    last_trade.pnl = pnl_for_this_trade # Corrected PnL
-                    last_trade.pnl_percentage = pnl_percentage_for_this_trade # Corrected PnL %
-                    last_trade.commission += commission_cost # Add exit commission to total commission for the trade
-                    last_trade.result = TradeResult.WIN if pnl_for_this_trade > 0 else (TradeResult.LOSS if pnl_for_this_trade < 0 else TradeResult.BREAKEVEN)
-                    last_trade.exit_order_id = f"exit_{last_trade.id.split('_')[1]}"
-
+            self.active_trade.exit_price = price
+            self.active_trade.exit_timestamp = timestamp
+            self.active_trade.pnl = pnl_for_this_trade
+            self.active_trade.pnl_percentage = pnl_percentage
+            self.active_trade.commission += commission_cost
+            self.active_trade.result = TradeResult.WIN if pnl_for_this_trade > 0 else (TradeResult.LOSS if pnl_for_this_trade < 0 else TradeResult.BREAKEVEN)
+            self.active_trade.exit_order_id = f"exit_{self.active_trade.id.split('_')[1]}"
+            
+            self.trades_log.append(self.active_trade.model_copy(deep=True)) # Log a copy
+            
             logger.info(
-                f"{timestamp} - EXECUTE CLOSE LONG: {self.current_position_size:.4f} {self.strategy.symbol} "
-                f"@ ${price:.2f}. PnL: ${pnl_for_this_trade:.2f} ({pnl_percentage_for_this_trade*100:.2f}%). " # <-- Problem is here
-                f"Capital: ${self.current_capital:.2f}. Comm: ${commission_cost:.2f}."
+                f"{timestamp} - EXECUTE CLOSE LONG (Signal): {self.active_trade.amount:.6f} {self.strategy.symbol} @ ${price:.2f}. "
+                f"PnL: ${pnl_for_this_trade:.2f} ({pnl_percentage:.2f}%). Total Comm: ${self.active_trade.commission:.2f}. "
+                f"Cash Now: ${self.current_cash:.2f}."
             )
-
-            # Reset position
-            self.current_position_size = 0.0
-            self.current_position_side = None
-            self.entry_price = None
+            self.active_trade = None
+            self._update_portfolio_value() # Assets back to 0
+            trade_executed = True
         
-        # Note: This basic engine doesn't handle SHORT signals or CLOSE_SHORT.
-        elif signal_type == SignalType.SHORT or signal_type == SignalType.CLOSE_SHORT:
-            logger.debug(f"{timestamp} - SHORT/CLOSE_SHORT signals are not handled by this basic backtesting engine.")
+        # Note: SHORT and CLOSE_SHORT signals are not handled here for simplicity
+        elif signal_type in (SignalType.SHORT, SignalType.CLOSE_SHORT):
+            logger.debug(f"{timestamp} - {signal_type.name} signals are not handled by this basic backtesting engine setup.")
+
+        if trade_executed:
+            self._update_portfolio_value(price if self.active_trade else None) # Recalculate equity
 
 
-    def _check_stop_loss_take_profit(self, current_bar: BarData):
-        """Checks and triggers SL/TP if conditions are met within the current bar's H/L prices."""
-        if self.current_position_side == OrderSide.BUY and self.entry_price is not None:
-            # Check Stop Loss
-            if self.stop_loss_pct:
-                stop_loss_price = self.entry_price * (1 - self.stop_loss_pct)
-                if current_bar.low <= stop_loss_price:
-                    logger.info(f"{current_bar.timestamp} - STOP LOSS triggered for {self.strategy.symbol} at ${stop_loss_price:.2f} (Low: {current_bar.low:.2f})")
-                    self._execute_trade(SignalType.CLOSE_LONG, current_bar.timestamp, stop_loss_price)
-                    return True # SL Triggered
+    def _handle_stop_take_profit(self, current_bar: BarData):
+        """Checks and executes SL/TP using StopManager. Modifies self.active_trade and portfolio."""
+        if self.active_trade is None or self.stop_manager is None:
+            return
 
-            # Check Take Profit (only if not SL triggered)
-            if self.take_profit_pct and self.current_position_side == OrderSide.BUY: # Check side again in case SL closed it
-                take_profit_price = self.entry_price * (1 + self.take_profit_pct)
-                if current_bar.high >= take_profit_price:
-                    logger.info(f"{current_bar.timestamp} - TAKE PROFIT triggered for {self.strategy.symbol} at ${take_profit_price:.2f} (High: {current_bar.high:.2f})")
-                    self._execute_trade(SignalType.CLOSE_LONG, current_bar.timestamp, take_profit_price)
-                    return True # TP Triggered
-        return False # No SL/TP triggered
+        # 1. Check Stop Loss
+        stop_loss_trigger_price = self.stop_manager.check_stop_loss(self.active_trade, current_bar)
+        if stop_loss_trigger_price is not None:
+            logger.info(f"{current_bar.timestamp} - STOP LOSS triggered for trade {self.active_trade.id} at derived price {stop_loss_trigger_price:.2f}")
+            # Simulate exit at the stop_loss_trigger_price (or bar.low/high depending on side and realism)
+            # For simplicity, assume it's hit at the trigger_price itself.
+            self._execute_exit(current_bar.timestamp, stop_loss_trigger_price, "StopLoss")
+            return # Exit, don't check for TP if SL hit
+
+        # 2. Check Take Profit (only if SL not triggered)
+        if self.active_trade: # SL might have closed the trade
+            take_profit_trigger_price = self.stop_manager.check_take_profit(self.active_trade, current_bar)
+            if take_profit_trigger_price is not None:
+                logger.info(f"{current_bar.timestamp} - TAKE PROFIT triggered for trade {self.active_trade.id} at derived price {take_profit_trigger_price:.2f}")
+                self._execute_exit(current_bar.timestamp, take_profit_trigger_price, "TakeProfit")
+                return
+
+    def _execute_exit(self, timestamp: datetime, price: float, exit_reason: str):
+        """ Helper to execute an exit for an active trade (SL, TP, or EOD). """
+        if not self.active_trade: return
+
+        exit_value = self.active_trade.amount * price
+        commission_cost = exit_value * self.commission_rate
+        self.current_cash += (exit_value - commission_cost)
+
+        pnl_for_this_trade = (price - self.active_trade.entry_price) * self.active_trade.amount - self.active_trade.commission - commission_cost
+        initial_trade_value = self.active_trade.entry_price * self.active_trade.amount
+        pnl_percentage = (pnl_for_this_trade / initial_trade_value) * 100 if initial_trade_value != 0 else 0
+        
+        self.active_trade.exit_price = price
+        self.active_trade.exit_timestamp = timestamp
+        self.active_trade.pnl = pnl_for_this_trade
+        self.active_trade.pnl_percentage = pnl_percentage
+        self.active_trade.commission += commission_cost
+        self.active_trade.result = TradeResult.WIN if pnl_for_this_trade > 0 else (TradeResult.LOSS if pnl_for_this_trade < 0 else TradeResult.BREAKEVEN)
+        self.active_trade.notes = exit_reason
+        self.active_trade.exit_order_id = f"{exit_reason.lower()}_{self.active_trade.id.split('_')[1]}"
+
+        self.trades_log.append(self.active_trade.model_copy(deep=True))
+        
+        logger.info(
+            f"{timestamp} - EXECUTE CLOSE LONG ({exit_reason}): {self.active_trade.amount:.6f} {self.strategy.symbol} @ ${price:.2f}. "
+            f"PnL: ${pnl_for_this_trade:.2f} ({pnl_percentage:.2f}%). Total Comm: ${self.active_trade.commission:.2f}. "
+            f"Cash Now: ${self.current_cash:.2f}."
+        )
+        self.active_trade = None
+        self._update_portfolio_value() # Recalculate equity (assets become 0)
 
 
     def run(self) -> tuple[List[Trade], Dict[str, Any]]:
-        """
-        Runs the backtest simulation.
-
-        Returns:
-            A tuple containing:
-            - List[Trade]: The log of all executed trades.
-            - Dict[str, Any]: The final portfolio state.
-        """
         logger.info(f"Starting backtest run for strategy '{self.strategy.name}'...")
-
-        # Option 1: Generate all signals first (less realistic for on_bar_data logic, good for vectorized)
-        # signals = self.strategy.generate_signals(self.data_feed_df)
-
-        # Option 2: Iterate bar by bar, calling strategy.on_bar_data (more realistic for event-driven)
-        # We will use Option 2 as it aligns better with how on_bar_data is defined.
-        # The strategy needs to maintain its own state.
-
-        # Initialize strategy's internal data history if it needs it separately
-        # For EWMAC, it builds its history internally via update_data_history.
-        self.strategy.data_history = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume']) # Reset history
+        self.strategy.data_history = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'atr', 'sentiment_score']) # Reset history
 
         for timestamp, row in self.data_feed_df.iterrows():
-            # Ensure timestamp is timezone-aware (UTC)
             ts_aware = timestamp.tz_localize('UTC') if timestamp.tzinfo is None else timestamp.tz_convert('UTC')
+            
+            # Prepare BarData object
+            bar_data_args = {
+                "timestamp": ts_aware, "open": row['open'], "high": row['high'],
+                "low": row['low'], "close": row['close'], "volume": row['volume'],
+                "symbol": self.strategy.symbol, "timeframe": self.strategy.timeframe,
+                "atr": row.get('atr') # If ATR is pre-calculated on data_feed_df
+            }
+            
+            # Phase 4: Incorporate sentiment data
+            current_sentiment_score = None
+            if self.sentiment_data_df is not None and not self.sentiment_data_df.empty:
+                # Try to get sentiment for the current bar's timestamp (or nearest past)
+                # Using asof for exact or previous available
+                try:
+                    # sentiment_series = self.sentiment_data_df['sentiment_score']
+                    # Ensure index is sorted for asof
+                    if not self.sentiment_data_df.index.is_monotonic_increasing:
+                         self.sentiment_data_df = self.sentiment_data_df.sort_index()
+                    
+                    sentiment_value = self.sentiment_data_df['sentiment_score'].asof(ts_aware)
+                    if pd.notna(sentiment_value):
+                        current_sentiment_score = sentiment_value
+                        bar_data_args["sentiment_score"] = current_sentiment_score
+                        # logger.debug(f"Sentiment score {current_sentiment_score} applied for bar {ts_aware}")
+                except KeyError: # No 'sentiment_score' column or timestamp not found
+                    # logger.debug(f"No sentiment data found for timestamp {ts_aware} using asof.")
+                    pass # Keep current_sentiment_score as None
+                except Exception as e_sentiment:
+                    logger.warning(f"Error accessing sentiment data for {ts_aware}: {e_sentiment}")
 
-            current_bar = BarData(
-                timestamp=ts_aware,
-                open=row['open'],
-                high=row['high'],
-                low=row['low'],
-                close=row['close'],
-                volume=row['volume'],
-                symbol=self.strategy.symbol,
-                timeframe=self.strategy.timeframe
-            )
+
+            current_bar = BarData(**bar_data_args)
             
-            # 1. Check for Stop-Loss / Take-Profit first based on H/L prices of current bar
-            # This assumes SL/TP can be triggered intra-bar.
-            sl_tp_triggered = self._check_stop_loss_take_profit(current_bar)
+            # 1. Check SL/TP first based on H/L prices of current bar
+            if self.active_trade:
+                self._handle_stop_take_profit(current_bar)
             
-            # 2. If SL/TP not triggered, get signal from strategy for the current bar's close
-            # The strategy's on_bar_data uses its internal history which is updated within the method.
-            if not sl_tp_triggered:
-                signal = self.strategy.on_bar_data(current_bar) # Strategy updates its state and history
+            # 2. If no SL/TP triggered (or no active trade), get signal from strategy
+            if self.active_trade is None or not (self.active_trade.exit_price is not None): # If trade still open or no trade
+                # The strategy's on_bar_data uses its internal history which is updated within the method.
+                # Pass sentiment score to strategy's on_bar_data if available
+                signal = self.strategy.on_bar_data(current_bar, sentiment_score=current_sentiment_score) # Modified to pass sentiment
                 
                 if signal and signal != SignalType.HOLD:
-                    # Assumption: Trades are executed at the close price of the bar where signal is generated.
-                    # Or, for more realism, at the open of the *next* bar.
-                    # For this basic engine, we'll use current bar's close.
-                    execution_price = current_bar.close
-                    self._execute_trade(signal, current_bar.timestamp, execution_price)
+                    execution_price = current_bar.close # Assume execution at close of signal bar
+                    self._execute_trade(signal, current_bar.timestamp, execution_price, current_bar_for_atr_calc=current_bar)
 
             # 3. Log portfolio state at the end of each bar
-            current_portfolio_value = self.current_capital
-            if self.current_position_side == OrderSide.BUY and self.entry_price is not None:
-                 # Mark-to-market value of current open position
-                current_portfolio_value += self.current_position_size * current_bar.close
-            
+            self._update_portfolio_value(current_bar.close) # Update with current bar's close for MTM
             self.portfolio_history.append({
                 "timestamp": current_bar.timestamp,
-                "capital": self.current_capital, # Cash available
-                "position_size": self.current_position_size if self.current_position_side else 0,
-                "asset_value": (self.current_position_size * current_bar.close) if self.current_position_side else 0,
-                "total_value": current_portfolio_value,
-                "current_price": current_bar.close
+                "cash": self.current_cash,
+                "asset_value": self.current_asset_value,
+                "total_value": self.current_portfolio_value, # This is equity
+                "current_price": current_bar.close,
+                "active_trade_pnl": (self.current_portfolio_value - self.active_trade.entry_price * self.active_trade.amount - self.active_trade.commission) if self.active_trade else 0.0
             })
 
-        # If there's an open position at the end of the backtest, close it at the last bar's close price
-        if self.current_position_side == OrderSide.BUY:
-            last_bar_timestamp = self.data_feed_df.index[-1]
-            last_bar_close = self.data_feed_df['close'].iloc[-1]
-            logger.info(f"{last_bar_timestamp} - End of backtest. Closing open LONG position for {self.strategy.symbol} at ${last_bar_close:.2f}")
-            self._execute_trade(SignalType.CLOSE_LONG, last_bar_timestamp.tz_localize('UTC') if last_bar_timestamp.tzinfo is None else last_bar_timestamp.tz_convert('UTC'), last_bar_close)
+        # End of backtest: close any open position
+        if self.active_trade:
+            last_bar_data = self.data_feed_df.iloc[-1]
+            last_bar_timestamp = self.data_feed_df.index[-1].tz_localize('UTC') if self.data_feed_df.index[-1].tzinfo is None else self.data_feed_df.index[-1].tz_convert('UTC')
+            last_bar_close = last_bar_data['close']
+            logger.info(f"{last_bar_timestamp} - End of backtest. Closing open {self.active_trade.side.value} position for {self.strategy.symbol} at ${last_bar_close:.2f}")
+            self._execute_exit(last_bar_timestamp, last_bar_close, "EndOfBacktest")
         
+        self._update_portfolio_value() # Final update (asset value should be 0)
         final_portfolio_state = {
             "initial_capital": self.initial_capital,
-            "final_capital_cash": self.current_capital, # This is the cash after all trades
-            "final_position_size": self.current_position_size, # Should be 0 if all closed
-            "total_value": self.portfolio_history[-1]['total_value'] if self.portfolio_history else self.initial_capital,
+            "final_portfolio_value": self.current_portfolio_value, # Should be mostly cash
+            "final_cash": self.current_cash,
             "end_timestamp": self.data_feed_df.index[-1]
         }
         
-        logger.info(f"Backtest run completed. Final Portfolio Value: ${final_portfolio_state['total_value']:.2f}")
+        logger.info(f"Backtest run completed. Final Portfolio Value: ${final_portfolio_state['final_portfolio_value']:.2f}")
         return self.trades_log, final_portfolio_state

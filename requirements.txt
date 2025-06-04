@@ -14,6 +14,7 @@ pandas-ta>=0.3.14b # For technical indicators like EMA in strategies
 
 # Async operations
 aiohttp>=3.8 # Often a dependency of ccxt async or useful for other async http
+httpx>=0.23 # For async requests in NewsScraper
 
 # Logging (built-in, but listed for completeness of thought)
 
@@ -24,12 +25,15 @@ aiohttp>=3.8 # Often a dependency of ccxt async or useful for other async http
 # pytest-asyncio
 
 # For Phase 4+ (AI/ML)
-# langchain
-# ollama
-# beautifulsoup4
-# newspaper3k
-# feedparser
-# jeepney # For D-Bus if needed
+langchain-core>=0.1 # Core Langchain components
+langchain-ollama>=0.1 # For Ollama integration with Langchain
+ollama>=0.1 # Direct Ollama client, if needed separately
+beautifulsoup4>=4.9 # For HTML parsing
+newspaper3k>=0.2.8 # For article scraping
+feedparser>=6.0 # For RSS feed parsing
+lxml[html_clean]>=4.9 # For HTML parsing and cleaning, dependency of newspaper3k
+browser-use>=0.2 # For agentic browser interaction
+# jeepney # For D-Bus if needed (currently placeholder)
 
 # For Phase 5+ (Advanced ML)
 # scikit-learn
@@ -41,5 +45,8 @@ aiohttp>=3.8 # Often a dependency of ccxt async or useful for other async http
 # For Phase 8+ (Scheduling)
 # APScheduler
 
-# Make sure to install Playwright browsers if using browser-use later:
+# Make sure to install Playwright browsers if using browser-use:
 # playwright install chromium --with-deps
+#
+# Also, if you haven't already from previous steps, you might need:
+# langchain (the main package if more extensive Langchain features are used beyond core/Ollama integration)

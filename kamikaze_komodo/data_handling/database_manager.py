@@ -1,17 +1,20 @@
 # kamikaze_komodo/data_handling/database_manager.py
+# Updated to include store/retrieve for NewsArticle
+
 import sqlite3
-from typing import List, Optional
-from kamikaze_komodo.core.models import BarData
+from typing import List, Optional, Dict, Any # Added Dict, Any
+from kamikaze_komodo.core.models import BarData, NewsArticle # Added NewsArticle
 from kamikaze_komodo.app_logger import get_logger
-# from kamikaze_komodo.config.settings import settings # settings is not used directly in this file
-from datetime import datetime, timezone, UTC # UTC is preferred for Python 3.11+
+from datetime import datetime, timezone, UTC 
+import json # For storing dicts/lists like related_symbols or key_themes
 
 logger = get_logger(__name__)
 
 class DatabaseManager:
     """
     Manages local storage of data (initially SQLite).
-    Timestamps are stored as ISO 8601 TEXT to ensure reliable conversion.
+    Timestamps are stored as ISO 8601 TEXT.
+    Lists/Dicts are stored as JSON TEXT.
     """
     def __init__(self, db_name: str = "kamikaze_komodo_data.db"):
         self.db_name = db_name
@@ -20,9 +23,7 @@ class DatabaseManager:
         self._create_tables()
 
     def _connect(self):
-        """Establishes a connection to the SQLite database."""
         try:
-            # MODIFIED: Using PARSE_COLNAMES only, to rely on Python for type conversion from TEXT
             self.conn = sqlite3.connect(self.db_name, detect_types=sqlite3.PARSE_COLNAMES)
             self.conn.row_factory = sqlite3.Row 
             logger.info(f"Successfully connected to database: {self.db_name}")
@@ -31,7 +32,6 @@ class DatabaseManager:
             self.conn = None
 
     def _create_tables(self):
-        """Creates necessary tables if they don't exist."""
         if not self.conn:
             logger.error("Cannot create tables, no database connection.")
             return
@@ -39,7 +39,6 @@ class DatabaseManager:
         try:
             cursor = self.conn.cursor()
             # BarData Table
-            # MODIFIED: timestamp column is now TEXT
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bar_data (
                     timestamp TEXT NOT NULL, 
@@ -50,10 +49,12 @@ class DatabaseManager:
                     low REAL NOT NULL,
                     close REAL NOT NULL,
                     volume REAL NOT NULL,
+                    atr REAL, 
+                    sentiment_score REAL,
                     PRIMARY KEY (timestamp, symbol, timeframe)
                 )
             """)
-            # NewsArticle Table (Example for future use - timestamp columns should also be TEXT if added)
+            # NewsArticle Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS news_articles (
                     id TEXT PRIMARY KEY,
@@ -65,167 +66,170 @@ class DatabaseManager:
                     content TEXT,
                     summary TEXT,
                     sentiment_score REAL,
-                    sentiment_label TEXT
+                    sentiment_label TEXT,
+                    sentiment_confidence REAL,
+                    key_themes TEXT,
+                    related_symbols TEXT,
+                    raw_llm_response TEXT 
                 )
             """)
-            # Trades Table (Example for future use - timestamp columns should also be TEXT if added)
+            # Trades Table (Example for future use)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
-                    id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    entry_order_id TEXT,
-                    exit_order_id TEXT,
-                    side TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    exit_price REAL,
-                    amount REAL NOT NULL,
-                    entry_timestamp TEXT NOT NULL, 
-                    exit_timestamp TEXT, 
-                    pnl REAL,
-                    pnl_percentage REAL,
-                    commission REAL DEFAULT 0.0,
-                    result TEXT,
-                    notes TEXT
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, entry_order_id TEXT, exit_order_id TEXT,
+                    side TEXT NOT NULL, entry_price REAL NOT NULL, exit_price REAL, amount REAL NOT NULL,
+                    entry_timestamp TEXT NOT NULL, exit_timestamp TEXT, pnl REAL, pnl_percentage REAL,
+                    commission REAL DEFAULT 0.0, result TEXT, notes TEXT, custom_fields TEXT
                 )
             """)
             self.conn.commit()
-            logger.info("Tables checked/created successfully (timestamps as TEXT).")
+            logger.info("Tables checked/created successfully (timestamps as TEXT, complex fields as JSON TEXT).")
         except sqlite3.Error as e:
             logger.error(f"Error creating tables: {e}")
 
-    def store_bar_data(self, bar_data_list: List[BarData]):
-        """
-        Stores a list of BarData objects into the database.
-        Timestamps are converted to ISO 8601 strings.
-        """
-        if not self.conn:
-            logger.error("Cannot store bar data, no database connection.")
-            return False
-        if not bar_data_list:
-            logger.info("No bar data provided to store.")
-            return True
+    def _to_iso_format(self, dt: Optional[datetime]) -> Optional[str]:
+        if dt is None: return None
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            dt = dt.replace(tzinfo=UTC)
+        else:
+            dt = dt.astimezone(UTC)
+        return dt.isoformat()
 
+    def _from_iso_format(self, iso_str: Optional[str]) -> Optional[datetime]:
+        if iso_str is None: return None
+        try:
+            dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                return dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
+        except ValueError:
+            logger.warning(f"Could not parse ISO timestamp string: {iso_str}")
+            return None
+
+    def store_bar_data(self, bar_data_list: List[BarData]):
+        if not self.conn: logger.error("No DB connection for bar data."); return False
+        if not bar_data_list: logger.info("No bar data to store."); return True
         try:
             cursor = self.conn.cursor()
-            data_to_insert = []
-            for bd in bar_data_list:
-                # Ensure timestamp is UTC and then convert to ISO 8601 string
-                ts_aware = bd.timestamp
-                if ts_aware.tzinfo is None or ts_aware.tzinfo.utcoffset(ts_aware) is None:
-                    # If somehow naive, assume UTC (though BarData should be UTC from fetcher)
-                    ts_aware = ts_aware.replace(tzinfo=UTC) 
-                else:
-                    ts_aware = ts_aware.astimezone(UTC) # Convert to UTC if it's some other timezone
-
-                data_to_insert.append((
-                    ts_aware.isoformat(), # MODIFIED: Store as ISO string
-                    bd.symbol, bd.timeframe,
-                    bd.open, bd.high, bd.low, bd.close, bd.volume
-                ))
-            
+            data_to_insert = [
+                (
+                    self._to_iso_format(bd.timestamp), bd.symbol, bd.timeframe,
+                    bd.open, bd.high, bd.low, bd.close, bd.volume,
+                    bd.atr, bd.sentiment_score # Added new fields
+                ) for bd in bar_data_list
+            ]
             cursor.executemany("""
-                INSERT OR IGNORE INTO bar_data 
-                (timestamp, symbol, timeframe, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, data_to_insert)
+                INSERT OR REPLACE INTO bar_data 
+                (timestamp, symbol, timeframe, open, high, low, close, volume, atr, sentiment_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
+            """, data_to_insert) # Added placeholders for new fields
             self.conn.commit()
-            logger.info(f"Stored/Ignored {len(data_to_insert)} bar data entries. ({cursor.rowcount} actually inserted/replaced)")
+            logger.info(f"Stored/Replaced {len(data_to_insert)} bar data entries. ({cursor.rowcount} affected)")
             return True
-        except sqlite3.Error as e:
-            logger.error(f"Error storing bar data: {e}")
-            return False
-        except Exception as e_gen: # Catch other potential errors like during isoformat
-            logger.error(f"Generic error storing bar data: {e_gen}", exc_info=True)
-            return False
-
+        except Exception as e:
+            logger.error(f"Error storing bar data: {e}", exc_info=True); return False
 
     def retrieve_bar_data(self, symbol: str, timeframe: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[BarData]:
-        """
-        Retrieves BarData objects from the database for a given symbol and timeframe.
-        Timestamps are converted from ISO 8601 strings back to datetime objects.
-        """
-        if not self.conn:
-            logger.error("Cannot retrieve bar data, no database connection.")
-            return []
-
+        if not self.conn: logger.error("No DB connection for bar data."); return []
         try:
             cursor = self.conn.cursor()
-            # MODIFIED: Parameters for timestamp comparison need to be ISO strings
-            query = "SELECT timestamp, open, high, low, close, volume, symbol, timeframe FROM bar_data WHERE symbol = ? AND timeframe = ?"
+            query = "SELECT timestamp, open, high, low, close, volume, symbol, timeframe, atr, sentiment_score FROM bar_data WHERE symbol = ? AND timeframe = ?"
             params = [symbol, timeframe]
 
-            if start_date:
-                query += " AND timestamp >= ?"
-                # Ensure start_date is UTC then format to ISO string for comparison
-                start_date_aware = start_date
-                if start_date_aware.tzinfo is None or start_date_aware.tzinfo.utcoffset(start_date_aware) is None:
-                    start_date_aware = start_date_aware.replace(tzinfo=UTC)
-                else:
-                    start_date_aware = start_date_aware.astimezone(UTC)
-                params.append(start_date_aware.isoformat())
-
-            if end_date:
-                query += " AND timestamp <= ?"
-                # Ensure end_date is UTC then format to ISO string for comparison
-                end_date_aware = end_date
-                if end_date_aware.tzinfo is None or end_date_aware.tzinfo.utcoffset(end_date_aware) is None:
-                    end_date_aware = end_date_aware.replace(tzinfo=UTC)
-                else:
-                    end_date_aware = end_date_aware.astimezone(UTC)
-                params.append(end_date_aware.isoformat())
-            
+            if start_date: query += " AND timestamp >= ?"; params.append(self._to_iso_format(start_date))
+            if end_date: query += " AND timestamp <= ?"; params.append(self._to_iso_format(end_date))
             query += " ORDER BY timestamp ASC"
 
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            
             bar_data_list = []
             for row in rows:
-                # MODIFIED: Parse timestamp string using fromisoformat and ensure it's UTC
-                # datetime.fromisoformat correctly handles strings like 'YYYY-MM-DDTHH:MM:SS.ffffff+00:00'
-                # or 'YYYY-MM-DD HH:MM:SS.ffffff' (if it was stored without TZ, though we store with)
-                # If it was stored with +00:00, fromisoformat makes it timezone-aware.
-                # If it was stored as naive UTC, we'll make it aware.
-                iso_timestamp_str = row['timestamp']
-                try:
-                    # fromisoformat handles timezone information like +00:00 if present
-                    dt_object = datetime.fromisoformat(iso_timestamp_str)
-                    # Ensure it is UTC. If it was parsed as naive, assume UTC.
-                    # If it was parsed with offset, convert to UTC for consistency.
-                    if dt_object.tzinfo is None or dt_object.tzinfo.utcoffset(dt_object) is None:
-                        dt_object = dt_object.replace(tzinfo=UTC)
-                    else:
-                        dt_object = dt_object.astimezone(UTC)
-                except ValueError as ve:
-                    logger.error(f"Could not parse timestamp '{iso_timestamp_str}' from DB: {ve}")
-                    continue # Skip this problematic row
-
+                dt_object = self._from_iso_format(row['timestamp'])
+                if not dt_object: continue
                 bar_data_list.append(BarData(
-                    timestamp=dt_object,
-                    open=row['open'],
-                    high=row['high'],
-                    low=row['low'],
-                    close=row['close'],
-                    volume=row['volume'],
-                    symbol=row['symbol'],
-                    timeframe=row['timeframe']
+                    timestamp=dt_object, open=row['open'], high=row['high'], low=row['low'],
+                    close=row['close'], volume=row['volume'], symbol=row['symbol'], timeframe=row['timeframe'],
+                    atr=row['atr'], sentiment_score=row['sentiment_score'] # Added new fields
                 ))
             logger.info(f"Retrieved {len(bar_data_list)} bar data entries for {symbol} ({timeframe}).")
             return bar_data_list
-        except sqlite3.Error as e:
-            logger.error(f"Error retrieving bar data for {symbol} ({timeframe}): {e}")
-            return []
-        except Exception as e_gen: # Catch other potential errors
-            logger.error(f"Generic error retrieving bar data for {symbol} ({timeframe}): {e_gen}", exc_info=True)
-            return []
+        except Exception as e:
+            logger.error(f"Error retrieving bar data for {symbol} ({timeframe}): {e}", exc_info=True); return []
+
+    def store_news_articles(self, articles: List[NewsArticle]):
+        if not self.conn: logger.error("No DB connection for news articles."); return False
+        if not articles: logger.info("No news articles to store."); return True
+        try:
+            cursor = self.conn.cursor()
+            data_to_insert = []
+            for article in articles:
+                data_to_insert.append((
+                    article.id, article.url, article.title,
+                    self._to_iso_format(article.publication_date),
+                    self._to_iso_format(article.retrieval_date),
+                    article.source, article.content, article.summary,
+                    article.sentiment_score, article.sentiment_label,
+                    article.sentiment_confidence,
+                    json.dumps(article.key_themes) if article.key_themes else None,
+                    json.dumps(article.related_symbols) if article.related_symbols else None,
+                    json.dumps(article.raw_llm_response) if article.raw_llm_response else None
+                ))
+            
+            cursor.executemany("""
+                INSERT OR REPLACE INTO news_articles
+                (id, url, title, publication_date, retrieval_date, source, content, summary,
+                 sentiment_score, sentiment_label, sentiment_confidence, key_themes, related_symbols, raw_llm_response)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, data_to_insert)
+            self.conn.commit()
+            logger.info(f"Stored/Replaced {len(data_to_insert)} news articles. ({cursor.rowcount} affected)")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing news articles: {e}", exc_info=True); return False
+
+    def retrieve_news_articles(self, symbol: Optional[str] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, source: Optional[str] = None, limit: int = 100) -> List[NewsArticle]:
+        if not self.conn: logger.error("No DB connection for news articles."); return []
+        try:
+            cursor = self.conn.cursor()
+            query = "SELECT * FROM news_articles WHERE 1=1"
+            params = []
+
+            if symbol: # Search in related_symbols (requires LIKE or a better FTS setup)
+                query += " AND related_symbols LIKE ?"
+                params.append(f"%\"{symbol}\"%") # Simple JSON array search, not very efficient
+            if start_date: # Based on publication_date
+                query += " AND publication_date >= ?"
+                params.append(self._to_iso_format(start_date))
+            if end_date:
+                query += " AND publication_date <= ?"
+                params.append(self._to_iso_format(end_date))
+            if source:
+                query += " AND source = ?"
+                params.append(source)
+            
+            query += " ORDER BY publication_date DESC, retrieval_date DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            articles_list = []
+            for row in rows:
+                articles_list.append(NewsArticle(
+                    id=row['id'], url=row['url'], title=row['title'],
+                    publication_date=self._from_iso_format(row['publication_date']),
+                    retrieval_date=self._from_iso_format(row['retrieval_date']),
+                    source=row['source'], content=row['content'], summary=row['summary'],
+                    sentiment_score=row['sentiment_score'], sentiment_label=row['sentiment_label'],
+                    sentiment_confidence=row['sentiment_confidence'],
+                    key_themes=json.loads(row['key_themes']) if row['key_themes'] else [],
+                    related_symbols=json.loads(row['related_symbols']) if row['related_symbols'] else [],
+                    raw_llm_response=json.loads(row['raw_llm_response']) if row['raw_llm_response'] else None
+                ))
+            logger.info(f"Retrieved {len(articles_list)} news articles with given criteria.")
+            return articles_list
+        except Exception as e:
+            logger.error(f"Error retrieving news articles: {e}", exc_info=True); return []
 
     def close(self):
-        """Closes the database connection."""
-        if self.conn:
-            self.conn.close()
-            logger.info("Database connection closed.")
-            self.conn = None
-
-    def __del__(self):
-        """Ensures the database connection is closed when the object is garbage collected."""
-        self.close()
+        if self.conn: self.conn.close(); logger.info("Database connection closed."); self.conn = None
+    def __del__(self): self.close()
