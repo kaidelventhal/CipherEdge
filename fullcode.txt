@@ -45,190 +45,346 @@ kamikaze_komodo/main.py:
 <code>
 # kamikaze_komodo/main.py
 import asyncio
-from kamikaze_komodo.app_logger import get_logger, logger as root_logger # Use root logger for main app messages
+import os
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Dict, Any
+
+from kamikaze_komodo.app_logger import get_logger, logger as root_logger
 from kamikaze_komodo.config.settings import settings
+
+# Phase 1 & 2 imports (already present)
 from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
 from kamikaze_komodo.data_handling.database_manager import DatabaseManager
 from kamikaze_komodo.exchange_interaction.exchange_api import ExchangeAPI
-
-# --- Import Phase 2 components ---
 from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager
 from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
 from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
 from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
-from kamikaze_komodo.core.models import BarData # For type hinting or example data
-from datetime import datetime, timedelta, timezone
-import pandas as pd
+from kamikaze_komodo.core.models import BarData, NewsArticle # Added NewsArticle
+from kamikaze_komodo.core.enums import SignalType # For strategy checking
+
+# Phase 3 imports
+from kamikaze_komodo.risk_control_module.position_sizer import FixedFractionalPositionSizer, ATRBasedPositionSizer
+from kamikaze_komodo.risk_control_module.stop_manager import PercentageStopManager, ATRStopManager
+# Portfolio constructor components are more for multi-asset; for single-asset backtest, they are less directly demonstrated here.
+
+# Phase 4 imports
+from kamikaze_komodo.ai_news_analysis_agent_module.news_scraper import NewsScraper
+from kamikaze_komodo.ai_news_analysis_agent_module.sentiment_analyzer import SentimentAnalyzer
+from kamikaze_komodo.ai_news_analysis_agent_module.browser_agent import BrowserAgent # Optional advanced feature
+from kamikaze_komodo.ai_news_analysis_agent_module.notification_listener import NotificationListener, dummy_notification_callback
 
 
-logger = get_logger(__name__) # Module-specific logger
+logger = get_logger(__name__)
 
 async def run_phase1_demonstration():
-    """Demonstrates Phase 1 components."""
-    root_logger.info("Starting Kamikaze Komodo Quantitative Trading Program - Phase 1 Demonstration")
-    if not settings:
-        root_logger.critical("Settings failed to load. Application cannot continue.")
-        return
+    root_logger.info("Starting Kamikaze Komodo - Phase 1: Core Infrastructure & Data")
+    if not settings: root_logger.critical("Settings failed to load."); return
 
-    root_logger.info(f"Log Level: {settings.log_level}")
-    root_logger.info(f"Default Symbol: {settings.default_symbol}")
-
-    # Initialize Database Manager
     db_manager = DatabaseManager()
+    data_fetcher = DataFetcher() # Uses exchange_id from settings
+    exchange_api = ExchangeAPI() # Uses exchange_id from settings
 
-    # Initialize Data Fetcher
-    data_fetcher = DataFetcher(exchange_id='kraken') # Default to Kraken as per plan
-    
-    # Fetch some historical data
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
-    # Fetch a small amount of recent data for demonstration
-    # For a proper run, fetch_historical_data_for_period would be better.
-    # since_date = datetime.now(timezone.utc) - timedelta(days=10)
-    # historical_data = await data_fetcher.fetch_historical_ohlcv(symbol, timeframe, since=since_date, limit=100)
-    
-    start_period = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days else 60)
+    start_period = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days else 30)
     end_period = datetime.now(timezone.utc)
-    
-    historical_data = await data_fetcher.fetch_historical_data_for_period(
-        symbol, timeframe, start_period, end_period
-    )
 
+    historical_data = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_period, end_period)
     if historical_data:
-        logger.info(f"Fetched {len(historical_data)} data points for {symbol} ({timeframe}).")
-        # Store data
+        logger.info(f"Fetched {len(historical_data)} bars for {symbol} ({timeframe}).")
         db_manager.store_bar_data(historical_data)
-        # Retrieve data (example)
-        retrieved_data = db_manager.retrieve_bar_data(symbol, timeframe, start_date=start_period)
-        logger.info(f"Retrieved {len(retrieved_data)} data points from DB for {symbol} ({timeframe}).")
+        retrieved_data = db_manager.retrieve_bar_data(symbol, timeframe, start_date=start_period, end_date=end_period)
+        logger.info(f"Retrieved {len(retrieved_data)} bars from DB for {symbol} ({timeframe}). First bar: {retrieved_data[0].timestamp if retrieved_data else 'N/A'}")
     else:
         logger.warning(f"No historical data fetched for {symbol}.")
 
-    await data_fetcher.close()
-
-    # Initialize Exchange API
-    exchange_api = ExchangeAPI(exchange_id='kraken')
-    balance = await exchange_api.fetch_balance() # Will show warning if API keys are dummy
+    balance = await exchange_api.fetch_balance()
     if balance:
-        # logger.info(f"Account Balance: {balance.get('total', {})}") # Structure varies
-        logger.info(f"Fetched balance. Free USD: {balance.get('USD', {}).get('free', 'N/A')}")
+        base_currency = symbol.split('/')[0] if '/' in symbol else symbol.split(':')[0] if ':' in symbol else "N/A"
+        quote_currency = symbol.split('/')[1] if '/' in symbol else "USD" # Assuming USD or similar
+        logger.info(f"Fetched balance. Free {base_currency}: {balance.get(base_currency, {}).get('free', 'N/A')}, Free {quote_currency}: {balance.get(quote_currency, {}).get('free', 'N/A')}")
     else:
-        logger.warning("Could not fetch account balance (may be due to dummy API keys or network issues).")
-    
+        logger.warning("Could not fetch account balance.")
+
+    await data_fetcher.close()
     await exchange_api.close()
     db_manager.close()
     root_logger.info("Phase 1 Demonstration completed.")
 
 
 async def run_phase2_demonstration():
-    """Demonstrates Phase 2 components: Basic Strategy & Backtesting."""
-    root_logger.info("Starting Kamikaze Komodo Quantitative Trading Program - Phase 2 Demonstration")
-    if not settings:
-        root_logger.critical("Settings failed to load. Application cannot continue.")
-        return
+    root_logger.info("Starting Kamikaze Komodo - Phase 2: Basic Strategy & Backtesting")
+    if not settings: root_logger.critical("Settings failed to load."); return
 
-    # 1. Get Data (either from DB or fetch fresh)
     db_manager = DatabaseManager()
     data_fetcher = DataFetcher()
 
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
-    start_date = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days > 0 else 365) # Ensure positive days
+    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 365
+    start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    # Try to retrieve from DB first
     historical_bars: List[BarData] = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+    required_bars_for_strategy = settings.ewmac_long_window + 5 # Example buffer
 
-    if not historical_bars or len(historical_bars) < (settings.ewmac_long_window + 5): # Need enough data for EMA + a bit more
-        logger.info(f"Not enough data in DB or data is old for {symbol} ({timeframe}). Fetching fresh data...")
+    if not historical_bars or len(historical_bars) < required_bars_for_strategy:
+        logger.info(f"Insufficient data in DB for {symbol}. Fetching fresh for {hist_days} days...")
         historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
-        if historical_bars:
-            db_manager.store_bar_data(historical_bars) # Store newly fetched data
-        else:
-            logger.error(f"Failed to fetch sufficient historical data for {symbol} ({timeframe}). Cannot proceed with backtest.")
-            await data_fetcher.close()
-            db_manager.close()
-            return
-    
-    await data_fetcher.close() # Close fetcher connection after use
-    db_manager.close() # Close DB connection after use
+        if historical_bars: db_manager.store_bar_data(historical_bars)
+        else: logger.error(f"Failed to fetch sufficient data for {symbol}. Backtest cannot proceed."); await data_fetcher.close(); db_manager.close(); return
 
-    if not historical_bars:
-        logger.error(f"No historical data available for {symbol} to run backtest.")
-        return
-    
-    logger.info(f"Using {len(historical_bars)} bars of historical data for backtesting {symbol} ({timeframe}).")
+    await data_fetcher.close()
+    db_manager.close()
 
-    # Convert BarData list to Pandas DataFrame for strategy processing
-    # The strategy will expect a DataFrame.
+    if not historical_bars or len(historical_bars) < required_bars_for_strategy:
+        logger.error(f"Still not enough historical data for {symbol} ({len(historical_bars)} bars) after fetch attempt. Backtest aborted."); return
+    logger.info(f"Using {len(historical_bars)} bars for backtesting {symbol}.")
+
     data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
     data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
     data_df.set_index('timestamp', inplace=True)
-    
-    if data_df.empty or len(data_df) < max(settings.ewmac_short_window, settings.ewmac_long_window):
-        logger.error(f"Not enough data points ({len(data_df)}) after DataFrame conversion for EWMAC strategy. Need at least {max(settings.ewmac_short_window, settings.ewmac_long_window)}.")
-        return
 
-    # 2. Initialize Strategy
-    ewmac_params = {
-        'short_window': settings.ewmac_short_window,
-        'long_window': settings.ewmac_long_window,
-        # 'signal_window': settings.config.getint('EWMAC_Strategy', 'SignalWindow') # if using MACD
-    }
+    if data_df.empty or len(data_df) < max(settings.ewmac_short_window, settings.ewmac_long_window):
+        logger.error(f"DataFrame conversion error or insufficient points for EWMAC ({len(data_df)})."); return
+
+    ewmac_params = settings.get_strategy_params("EWMAC") # Gets params from [EWMAC_Strategy]
     ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
 
-    # 3. Initialize Strategy Manager (Optional for single strategy backtest, but good for structure)
-    strategy_manager = StrategyManager()
-    strategy_manager.add_strategy(ewmac_strategy)
+    initial_capital = 10000.00
+    commission_bps = settings.commission_bps
+    backtest_engine = BacktestingEngine(data_feed_df=data_df, strategy=ewmac_strategy, initial_capital=initial_capital, commission_bps=commission_bps)
 
-    # 4. Initialize Backtesting Engine
-    # For this basic backtest, we'll pass data and strategy directly.
-    # A more advanced engine would take data from a source and manage strategy execution.
-    initial_capital = 10000.00 # Example starting capital
-    commission_bps = 0.001 # Example commission 0.1% (10 bps)
-    
-    backtest_engine = BacktestingEngine(
-        data_feed_df=data_df, # Engine expects DataFrame
-        strategy=ewmac_strategy, # Pass the single strategy instance
-        initial_capital=initial_capital,
-        commission_bps=commission_bps
-    )
-    
-    # 5. Run Backtest
-    logger.info(f"Running backtest for EWMAC strategy on {symbol}...")
+    logger.info(f"Running basic backtest for EWMAC on {symbol}...")
     trades_log, final_portfolio = backtest_engine.run()
 
-    # 6. Analyze Performance
     if trades_log:
-        logger.info(f"Backtest completed. Generated {len(trades_log)} trades.")
-        performance_analyzer = PerformanceAnalyzer(
-            trades=trades_log, 
-            initial_capital=initial_capital,
-            final_capital=final_portfolio['total_value'] # Access total_value from portfolio dict
-            )
-        
+        logger.info(f"Backtest (Phase 2) completed. Generated {len(trades_log)} trades.")
+        performance_analyzer = PerformanceAnalyzer(trades=trades_log, initial_capital=initial_capital, final_capital=final_portfolio['final_portfolio_value'])
         metrics = performance_analyzer.calculate_metrics()
         performance_analyzer.print_summary(metrics)
-        
-        # Store PnL series for plotting or further analysis if needed
-        # pnl_series = performance_analyzer.get_pnl_series()
-        # equity_curve = performance_analyzer.get_equity_curve()
-        # logger.debug(f"Equity Curve (first 5): \n{equity_curve.head()}")
     else:
-        logger.info("Backtest completed. No trades were executed.")
-        logger.info(f"Final portfolio value: ${final_portfolio['total_value']:.2f}")
-
-
+        logger.info(f"Backtest (Phase 2) completed. No trades executed. Final portfolio value: ${final_portfolio['final_portfolio_value']:.2f}")
     root_logger.info("Phase 2 Demonstration completed.")
+
+async def run_phase3_demonstration():
+    root_logger.info("Starting Kamikaze Komodo - Phase 3: Risk Management Integration")
+    if not settings: root_logger.critical("Settings failed to load."); return
+
+    db_manager = DatabaseManager()
+    data_fetcher = DataFetcher()
+    symbol = settings.default_symbol
+    timeframe = settings.default_timeframe
+    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 365
+    start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
+    end_date = datetime.now(timezone.utc)
+
+    historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+    # Strategy itself will define ATR period in its params
+    ewmac_temp_params = settings.get_strategy_params("EWMAC")
+    atr_period_for_min_bars = int(ewmac_temp_params.get("atr_period", 14))
+    min_bars_needed = (settings.ewmac_long_window + atr_period_for_min_bars + 5) # For EMA + ATR + buffer
+
+    if not historical_bars or len(historical_bars) < min_bars_needed:
+        logger.info(f"Fetching fresh data for Phase 3 backtest (need ~{min_bars_needed} bars)...")
+        historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
+        if historical_bars: db_manager.store_bar_data(historical_bars)
+        else: logger.error(f"Failed to fetch data for {symbol}. Aborting."); await data_fetcher.close(); db_manager.close(); return
+
+    await data_fetcher.close(); db_manager.close()
+    if not historical_bars or len(historical_bars) < min_bars_needed:
+        logger.error(f"Not enough data ({len(historical_bars)} bars) for Phase 3 backtest. Aborting."); return
+
+    data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
+    data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
+    data_df.set_index('timestamp', inplace=True)
+    # Note: EWMACStrategy will calculate ATR internally.
+
+    ewmac_params = settings.get_strategy_params("EWMAC")
+    # Ensure ATR period is in params for the strategy to use it
+    if 'atr_period' not in ewmac_params: ewmac_params['atr_period'] = 14
+    ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
+
+    # Position Sizer (from config)
+    if settings.position_sizer_type.lower() == 'atrbased':
+        position_sizer = ATRBasedPositionSizer(
+            risk_per_trade_fraction=settings.atr_based_risk_per_trade_fraction,
+            atr_multiple_for_stop=settings.atr_based_atr_multiple_for_stop
+        )
+    else: # Default to FixedFractional
+        position_sizer = FixedFractionalPositionSizer(fraction=settings.fixed_fractional_allocation_fraction)
+    logger.info(f"Using Position Sizer: {position_sizer.__class__.__name__}")
+
+    # Stop Manager (from config)
+    if settings.stop_manager_type.lower() == 'atrbased':
+        stop_manager = ATRStopManager(atr_multiple=settings.atr_stop_atr_multiple)
+    else: # Default to PercentageBased
+        stop_manager = PercentageStopManager(
+            stop_loss_pct=settings.percentage_stop_loss_pct,
+            take_profit_pct=settings.percentage_stop_take_profit_pct
+        )
+    logger.info(f"Using Stop Manager: {stop_manager.__class__.__name__}")
+
+    initial_capital = 10000.00
+    commission_bps = settings.commission_bps
+    backtest_engine = BacktestingEngine(
+        data_feed_df=data_df,
+        strategy=ewmac_strategy,
+        initial_capital=initial_capital,
+        commission_bps=commission_bps,
+        position_sizer=position_sizer,
+        stop_manager=stop_manager
+    )
+
+    logger.info(f"Running Phase 3 backtest (EWMAC with Risk Management) on {symbol}...")
+    trades_log, final_portfolio = backtest_engine.run()
+
+    if trades_log:
+        logger.info(f"Backtest (Phase 3) completed. Generated {len(trades_log)} trades.")
+        performance_analyzer = PerformanceAnalyzer(trades=trades_log, initial_capital=initial_capital, final_capital=final_portfolio['final_portfolio_value'])
+        metrics = performance_analyzer.calculate_metrics()
+        performance_analyzer.print_summary(metrics)
+    else:
+        logger.info(f"Backtest (Phase 3) completed. No trades executed. Final portfolio: ${final_portfolio['final_portfolio_value']:.2f}")
+    root_logger.info("Phase 3 Demonstration completed.")
+
+
+async def run_phase4_demonstration():
+    root_logger.info("Starting Kamikaze Komodo - Phase 4: AI News & Sentiment Integration")
+    if not settings: root_logger.critical("Settings failed to load."); return
+
+    # ... (News Scraping, BrowserAgent, NotificationListener sections remain the same) ...
+    # Ensure those sections are complete as in the previous response if you copy this one.
+
+    # 4. Backtesting with Simulated Sentiment Data
+    logger.info("Proceeding to backtest with sentiment integration...")
+    db_manager = DatabaseManager()
+    data_fetcher = DataFetcher()
+    symbol = settings.default_symbol
+    timeframe = settings.default_timeframe
+    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 90 
+    start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
+    end_date = datetime.now(timezone.utc)
+
+    historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+    ewmac_temp_params_sentiment = settings.get_strategy_params("EWMAC")
+    atr_period_for_min_bars_sentiment = int(ewmac_temp_params_sentiment.get("atr_period", 14))
+    min_bars_needed_sentiment = (settings.ewmac_long_window + atr_period_for_min_bars_sentiment + 5)
+
+    if not historical_bars or len(historical_bars) < min_bars_needed_sentiment:
+        logger.info(f"Fetching fresh data for Phase 4 backtest (need ~{min_bars_needed_sentiment} bars)...")
+        historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
+        if historical_bars: db_manager.store_bar_data(historical_bars)
+        else: logger.error(f"Failed to fetch data for {symbol}. Aborting Phase 4 backtest."); await data_fetcher.close(); db_manager.close(); return
+
+    await data_fetcher.close(); db_manager.close()
+    if not historical_bars or len(historical_bars) < min_bars_needed_sentiment:
+        logger.error(f"Not enough data ({len(historical_bars)} bars) for Phase 4 backtest. Aborting."); return
+
+    data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
+    data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
+    data_df.set_index('timestamp', inplace=True)
+
+    # Load Simulated Sentiment Data
+    sentiment_df: Optional[pd.DataFrame] = None
+    if settings.simulated_sentiment_data_path and settings.enable_sentiment_analysis:
+        sentiment_csv_path = settings.simulated_sentiment_data_path
+        logger.info(f"Attempting to load simulated sentiment data from: {sentiment_csv_path}")
+        if os.path.exists(sentiment_csv_path):
+            try:
+                sentiment_df = pd.read_csv(sentiment_csv_path, parse_dates=['timestamp'], index_col='timestamp')
+                if sentiment_df.empty:
+                    logger.warning(f"Simulated sentiment data file is empty: {sentiment_csv_path}")
+                    sentiment_df = None
+                else:
+                    if sentiment_df.index.tz is None:
+                        sentiment_df.index = sentiment_df.index.tz_localize('UTC')
+                    else:
+                        sentiment_df.index = sentiment_df.index.tz_convert('UTC')
+                    
+                    if 'sentiment_score' not in sentiment_df.columns:
+                        logger.error(f"'sentiment_score' column not found in {sentiment_csv_path}. Sentiment will not be used.")
+                        sentiment_df = None
+                    else:
+                        logger.info(f"Successfully loaded simulated sentiment data from: {sentiment_csv_path} with {len(sentiment_df)} entries.")
+                        logger.info(f"First 5 sentiment scores:\n{sentiment_df['sentiment_score'].head().to_string()}")
+                        logger.info(f"Last 5 sentiment scores:\n{sentiment_df['sentiment_score'].tail().to_string()}")
+                        logger.info(f"Sentiment data timespan: {sentiment_df.index.min()} to {sentiment_df.index.max()}")
+            except Exception as e_csv:
+                logger.error(f"Error loading simulated sentiment data from {sentiment_csv_path}: {e_csv}. Proceeding without sentiment.", exc_info=True)
+                sentiment_df = None
+        else:
+            logger.warning(f"Simulated sentiment data file NOT FOUND at: {sentiment_csv_path}. Proceeding without external sentiment.")
+    elif not settings.enable_sentiment_analysis:
+        logger.info("Sentiment analysis is disabled in settings. Backtest will not use external sentiment data.")
+    else:
+        logger.info("No simulated sentiment data path provided in settings. Proceeding without external sentiment.")
+
+    ewmac_params_sentiment = settings.get_strategy_params("EWMAC")
+    if 'sentiment_filter_long_threshold' not in ewmac_params_sentiment:
+        ewmac_params_sentiment['sentiment_filter_long_threshold'] = settings.sentiment_filter_threshold_long
+    if 'sentiment_filter_short_threshold' not in ewmac_params_sentiment:
+        ewmac_params_sentiment['sentiment_filter_short_threshold'] = settings.sentiment_filter_threshold_short
+    if 'atr_period' not in ewmac_params_sentiment: ewmac_params_sentiment['atr_period'] = 14
+
+    ewmac_strategy_sentiment = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params_sentiment)
+
+    if settings.position_sizer_type.lower() == 'atrbased':
+        position_sizer_sent = ATRBasedPositionSizer(settings.atr_based_risk_per_trade_fraction, settings.atr_based_atr_multiple_for_stop)
+    else:
+        position_sizer_sent = FixedFractionalPositionSizer(settings.fixed_fractional_allocation_fraction)
+
+    if settings.stop_manager_type.lower() == 'atrbased':
+        stop_manager_sent = ATRStopManager(settings.atr_stop_atr_multiple)
+    else:
+        stop_manager_sent = PercentageStopManager(settings.percentage_stop_loss_pct, settings.percentage_stop_take_profit_pct)
+
+    initial_capital = 10000.00
+    commission_bps = settings.commission_bps
+    backtest_engine_sentiment = BacktestingEngine(
+        data_feed_df=data_df,
+        strategy=ewmac_strategy_sentiment,
+        initial_capital=initial_capital,
+        commission_bps=commission_bps,
+        position_sizer=position_sizer_sent,
+        stop_manager=stop_manager_sent,
+        sentiment_data_df=sentiment_df 
+    )
+
+    logger.info(f"Running Phase 4 backtest (EWMAC with Sentiment & Risk Mgmt) on {symbol}...")
+    trades_log, final_portfolio = backtest_engine_sentiment.run()
+
+    if trades_log:
+        logger.info(f"Backtest (Phase 4) completed. Generated {len(trades_log)} trades.")
+        performance_analyzer = PerformanceAnalyzer(trades=trades_log, initial_capital=initial_capital, final_capital=final_portfolio['final_portfolio_value'])
+        metrics = performance_analyzer.calculate_metrics()
+        performance_analyzer.print_summary(metrics)
+    else:
+        logger.info(f"Backtest (Phase 4) completed. No trades executed. Final portfolio: ${final_portfolio['final_portfolio_value']:.2f}")
+    root_logger.info("Phase 4 Demonstration completed.")
 
 
 async def main():
-    """
-    Main asynchronous function to run the application phases.
-    """
-    # Uncomment the phase you want to demonstrate
+    root_logger.info("Kamikaze Komodo Program Starting...")
+    if not settings:
+        root_logger.critical("Settings failed to load. Application cannot start.")
+        return
+
+    # --- Select phases to run ---
     # await run_phase1_demonstration()
-    await run_phase2_demonstration()
+    # await run_phase2_demonstration()
+    await run_phase3_demonstration()
+    await run_phase4_demonstration()
+    # For Phase 4, ensure Ollama is running if live sentiment analysis is part of it,
+    # and 'data/simulated_sentiment_data.csv' exists (relative to kamikaze_komodo/) for backtesting.
+    # Example simulated_sentiment_data.csv in kamikaze_komodo/data/:
+    # timestamp,sentiment_score
+    # 2023-01-01T00:00:00Z,0.5
+    # 2023-01-01T01:00:00Z,-0.2
+
+    root_logger.info("Kamikaze Komodo Program Finished.")
 
 
 if __name__ == "__main__":
@@ -645,107 +801,131 @@ from kamikaze_komodo.app_logger import get_logger
 # from jeepney import DBusAddress, new_method_call # If fully implementing
 # from jeepney.io.asyncio import open_dbus_connection # If fully implementing
 import asyncio
+from typing import Callable, Awaitable, Dict, Any, Optional
 
 logger = get_logger(__name__)
 
 class NotificationListener:
     """
     Listens for desktop notifications using D-Bus (via Jeepney).
-    Basic implementation for Phase 4. Full D-Bus interaction is complex.
+    Basic implementation for Phase 4. Full D-Bus interaction is complex and OS-dependent.
     """
-    def __init__(self, callback_on_notification=None):
+    def __init__(self, callback_on_notification: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None):
         """
         Args:
             callback_on_notification: An async function to call when a notification is received.
-                                      It should accept a dictionary or object with notification details.
+                                      It should accept a dictionary with notification details.
         """
         self.callback_on_notification = callback_on_notification
         self._running = False
-        logger.info("NotificationListener initialized (basic implementation).")
-        logger.warning("Full D-Bus notification listening with Jeepney is not implemented in this basic version.")
-        logger.warning("This module will act as a placeholder for now.")
+        logger.info("NotificationListener initialized.")
+        if self.callback_on_notification is None:
+            logger.warning("No callback provided for NotificationListener. It will not perform any actions on notifications.")
+        logger.warning("Full D-Bus notification listening with Jeepney is a complex, OS-dependent feature and is currently a placeholder.")
+        logger.warning("To enable, ensure Jeepney is installed and D-Bus is correctly configured on your Linux desktop.")
+
 
     async def start_listening(self):
         """
-        Starts listening for D-Bus notifications.
-        Placeholder for Jeepney implementation.
+        Starts listening for D-Bus notifications. Placeholder for Jeepney implementation.
         """
         self._running = True
-        logger.info("Notification listener started (simulated).")
-        # In a real implementation, this would connect to D-Bus and register a match rule.
-        # Example (conceptual, not fully functional without more setup):
+        logger.info("Notification listener started (simulated/placeholder).")
+        if self.callback_on_notification is None:
+            logger.error("NotificationListener started but no callback is set. It will be idle.")
+            # We can simply return or let the placeholder loop run idly.
+
+        # --- Conceptual Jeepney Implementation (Highly OS/Setup Dependent) ---
         # try:
+        #     from jeepney import DBusAddress, new_method_call
+        #     from jeepney.io.asyncio import open_dbus_connection
+        #     logger.info("Attempting to connect to D-Bus for notifications...")
         #     conn = await open_dbus_connection()
-        #     addr = DBusAddress('org.freedesktop.Notifications', '/org/freedesktop/Notifications',
-        #                        'org.freedesktop.Notifications')
+        #     logger.info("Connected to D-Bus. Setting up match rule for org.freedesktop.Notifications.Notify.")
         #
-        #     # Call AddMatch to subscribe to notifications
-        #     match_rule = "type='method_call',interface='org.freedesktop.Notifications',member='Notify'"
-        #     # Or for signals: "type='signal',interface='org.freedesktop.Notifications',member='NotificationClosed'" etc.
-        #
-        #     # This is a simplification. Proper handling involves message loops and parsing.
-        #     # msg = new_method_call(addr, 'AddMatch', 's', (match_rule,))
-        #     # reply = await conn.send_and_get_reply(msg) # This may not be the correct call
-        #
-        #     logger.info("Subscribed to D-Bus notifications (conceptual).")
+        #     # Interface to call AddMatch on (DBUS daemon itself)
+        #     dbus_daemon_addr = DBusAddress('org.freedesktop.DBus', '/org/freedesktop/DBus', 'org.freedesktop.DBus')
+        #     match_rule = "type='signal',interface='org.freedesktop.Notifications',member='Notify'"
+        #     add_match_msg = new_method_call(dbus_daemon_addr, 'AddMatch', 's', (match_rule,))
+        #     await conn.send_and_get_reply(add_match_msg) # No reply expected or needed for AddMatch usually
+        #     logger.info(f"Match rule added: {match_rule}")
         #
         #     while self._running:
-        #         # msg_received = await conn.receive() # This is a blocking call, or needs an event loop
-        #         # if msg_received and msg_received.member == 'Notify': # And other checks
-        #         #    parsed_notification = self.parse_notification_data(msg_received.body)
-        #         #    if self.callback_on_notification and parsed_notification:
-        #         #        await self.callback_on_notification(parsed_notification)
-        #         await asyncio.sleep(5) # Simulate periodic check or activity
-        #         logger.debug("Notification listener alive (simulated check)...")
-        #
+        #         try:
+        #             msg_received = await asyncio.wait_for(conn.receive(), timeout=1.0) # Add timeout
+        #             if msg_received and msg_received.member == 'Notify' and msg_received.interface == 'org.freedesktop.Notifications':
+        #                 parsed_notification = self.parse_notification_data(msg_received.body)
+        #                 if self.callback_on_notification and parsed_notification:
+        #                     logger.info(f"Received D-Bus Notification: {parsed_notification.get('summary')}")
+        #                     await self.callback_on_notification(parsed_notification)
+        #             elif msg_received:
+        #                 logger.debug(f"Received other D-Bus message: Member={msg_received.member}, Interface={msg_received.interface}")
+        #         except asyncio.TimeoutError:
+        #             continue # Just to allow checking self._running
+        #         except Exception as e_recv:
+        #             logger.error(f"Error receiving/processing D-Bus message: {e_recv}", exc_info=True)
+        #             await asyncio.sleep(5) # Avoid rapid error loops
+        # except ImportError:
+        #     logger.error("Jeepney library not found. D-Bus notification listener cannot run. Please install it.")
+        # except ConnectionRefusedError:
+        #     logger.error("Could not connect to D-Bus. Ensure D-Bus daemon is running and accessible.")
         # except Exception as e:
-        #     logger.error(f"Error in D-Bus notification listener: {e}", exc_info=True)
+        #     logger.error(f"An error occurred in D-Bus notification listener setup: {e}", exc_info=True)
         # finally:
-        #     # if conn: await conn.close()
-        #     logger.info("Notification listener D-Bus connection closed (simulated).")
-        
-        # Simulate activity for now
-        while self._running:
-            await asyncio.sleep(30) # Placeholder loop
-            logger.debug("Notification listener placeholder task running...")
+        #     if 'conn' in locals() and conn:
+        #         # Optionally remove match rule before closing
+        #         # remove_match_msg = new_method_call(dbus_daemon_addr, 'RemoveMatch', 's', (match_rule,))
+        #         # await conn.send_and_get_reply(remove_match_msg)
+        #         await conn.close()
+        #         logger.info("D-Bus connection closed.")
+        #     self._running = False
+        # --- End Conceptual Jeepney ---
 
+        # Current Placeholder Loop
+        while self._running:
+            await asyncio.sleep(30)
+            if self.callback_on_notification is not None: # Only log if it's supposed to be doing something
+                logger.debug("Notification listener placeholder task running (no actual D-Bus listening)...")
 
     def stop_listening(self):
-        """Stops the D-Bus notification listener."""
         self._running = False
-        logger.info("Notification listener stopped (simulated).")
+        logger.info("Notification listener stopped (simulated/placeholder).")
 
-    def parse_notification_data(self, notification_body) -> Optional[Dict[str, Any]]:
+    def parse_notification_data(self, notification_body: tuple) -> Optional[Dict[str, Any]]:
         """
-        Parses the D-Bus notification data into a structured dictionary.
-        The structure of notification_body depends on how Jeepney returns it.
-        Typically, for Notify, it's (app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout).
+        Parses the D-Bus notification data (signal body for Notify) into a structured dictionary.
+        Standard Notify signature: (app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout)
+                                  (s, u, s, s, s, as, a{sv}, i)
         """
-        # Example parsing (adjust based on actual D-Bus data structure from Jeepney)
-        # if isinstance(notification_body, tuple) and len(notification_body) >= 8:
-        #     return {
-        #         "app_name": notification_body[0],
-        #         "replaces_id": notification_body[1],
-        #         "app_icon": notification_body[2],
-        #         "summary": notification_body[3], # Title
-        #         "body": notification_body[4],    # Message
-        #         "actions": notification_body[5],
-        #         "hints": notification_body[6],   # Dict of hints
-        #         "expire_timeout": notification_body[7]
-        #     }
-        logger.warning("parse_notification_data is a placeholder.")
+        try:
+            if isinstance(notification_body, tuple) and len(notification_body) == 8:
+                return {
+                    "app_name": notification_body[0],
+                    "replaces_id": notification_body[1], # uint32
+                    "app_icon": notification_body[2],
+                    "summary": notification_body[3],  # Title
+                    "body": notification_body[4],     # Message
+                    "actions": notification_body[5], # List of strings (action identifiers)
+                    "hints": notification_body[6],   # Dict of variant hints
+                    "expire_timeout": notification_body[7] # int32
+                }
+            else:
+                logger.warning(f"Received notification body with unexpected format or length: {notification_body}")
+        except Exception as e:
+            logger.error(f"Error parsing notification data: {e}. Body was: {notification_body}", exc_info=True)
         return None
 
-
 async def dummy_notification_callback(notification_details: Dict[str, Any]):
-    logger.info(f"Dummy Callback: Received Notification: {notification_details.get('summary')} - {notification_details.get('body')}")
-    # Here, you might trigger news analysis, etc.
+    logger.info(f"Dummy Callback: Received Notification - Summary: '{notification_details.get('summary')}', Body: '{notification_details.get('body')}'")
+    # Here, you might trigger news analysis, sentiment analysis, or other actions.
 
+# Example:
 # if __name__ == "__main__":
 #     listener = NotificationListener(callback_on_notification=dummy_notification_callback)
+#     # To test this, you would need a D-Bus environment (Linux desktop) and send a notification:
+#     # e.g., using `notify-send "Test Summary" "This is a test notification body."` in terminal.
 #     try:
-#         # In a real app, this would be part of the main event loop
-#         asyncio.run(listener.start_listening()) 
+#         asyncio.run(listener.start_listening())
 #     except KeyboardInterrupt:
 #         listener.stop_listening()
 #         logger.info("Notification listener example stopped by user.")
@@ -1545,12 +1725,14 @@ KrakenTestnet = True
 DefaultSymbol = PF_XBTUSD      
 DefaultTimeframe = 4h     
 HistoricalDataDays = 365
-DataFetchLimitPerCall = 500 ; For paginated historical data
+DataFetchLimitPerCall = 500 
+; For paginated historical data
 
 [Trading]
 MaxPortfolioRisk = 0.02 
 DefaultLeverage = 1.0
-CommissionBPS = 10 ; Basis points, e.g. 10 bps = 0.1% = 0.001 rate
+CommissionBPS = 10 
+; Basis points, e.g. 10 bps = 0.1% = 0.001 rate
 
 [EWMAC_Strategy]
 ShortWindow = 12
@@ -1559,29 +1741,42 @@ SignalWindow = 9
 
 ; --- Phase 3 Settings ---
 [RiskManagement]
-PositionSizer = FixedFractional ; Options: FixedFractional, ATRBased
-FixedFractional_AllocationFraction = 0.10 ; Fraction of *equity* to allocate to a new position
-ATRBased_RiskPerTradeFraction = 0.01 ; Fraction of *equity* to risk per trade (requires ATR from strategy/bar)
-ATRBased_ATRMultipleForStop = 2.0 ; How many ATRs away the stop is placed for sizing calculation
+PositionSizer = FixedFractional 
+; Options: FixedFractional, ATRBased
+FixedFractional_AllocationFraction = 0.10 
+; Fraction of *equity* to allocate to a new position
+ATRBased_RiskPerTradeFraction = 0.01 
+; Fraction of *equity* to risk per trade (requires ATR from strategy/bar)
+ATRBased_ATRMultipleForStop = 2.0 
+; How many ATRs away the stop is placed for sizing calculation
 
-StopManager_Default = PercentageBased ; Options: PercentageBased, ATRBased (ATRBased needs ATR on trade/bar)
-PercentageStop_LossPct = 0.02 ; 2% stop loss from entry. Set to 0 or None to disable.
-PercentageStop_TakeProfitPct = 0.05 ; 5% take profit from entry. Set to 0 or None to disable.
-ATRStop_ATRMultiple = 2.0 ; For ATRStopManager if used.
+StopManager_Default = PercentageBased 
+; Options: PercentageBased, ATRBased (ATRBased needs ATR on trade/bar)
+PercentageStop_LossPct = 0.02 
+; 2% stop loss from entry. Set to 0 or None to disable.
+PercentageStop_TakeProfitPct = 0.05 
+; 5% take profit from entry. Set to 0 or None to disable.
+ATRStop_ATRMultiple = 2.0 
+; For ATRStopManager if used.
 
 [PortfolioConstructor]
-AssetAllocator = FixedWeight ; For now, mainly conceptual for single asset backtest
-DefaultAllocation_BTCUSD = 1.0 ; Example: PF_XBTUSD if using Kraken Futures symbol
-Rebalancer_DeviationThreshold = 0.05 ; For BasicRebalancer (conceptual for now)
+AssetAllocator = FixedWeight 
+; For now, mainly conceptual for single asset backtest
+DefaultAllocation_BTCUSD = 1.0 
+; Example: PF_XBTUSD if using Kraken Futures symbol
+Rebalancer_DeviationThreshold = 0.05 
+; For BasicRebalancer (conceptual for now)
 
 ; --- Phase 4 Settings ---
 [AI_NewsAnalysis]
 EnableSentimentAnalysis = True
-SentimentLLMModel = gemma:7b # Changed to a smaller, potentially faster model for testing. User can change to gemma3:12b etc.
-OllamaBaseURL = http://localhost:11434 ; Optional: if Ollama runs on a different host/port
-SentimentFilter_Threshold_Long = 0.1 ; Example: Only take LONG if sentiment > 0.1
-SentimentFilter_Threshold_Short = -0.1 ; Example: Only take SHORT if sentiment < -0.1 (if shorting implemented)
-SimulatedSentimentDataPath = data/simulated_sentiment_data.csv ; For backtesting
+SentimentLLMModel = gemma3:12b 
+SentimentFilter_Threshold_Long = 0.1 
+; Example: Only take LONG if sentiment > 0.1
+SentimentFilter_Threshold_Short = -0.1 
+; Example: Only take SHORT if sentiment < -0.1 (if shorting implemented)
+SimulatedSentimentDataPath = data/simulated_sentiment_data.csv 
+; For backtesting
 
 NewsScraper_Enable = True
 RSSFeed_CoinTelegraph = https://cointelegraph.com/rss
@@ -1590,10 +1785,13 @@ RSSFeed_SeekingAlpha = https://seekingalpha.com/market_currents.xml
 # Example: WebsiteScrape_CoinDesk_URL = https://www.coindesk.com/
 # WebsiteScrape_CoinDesk_Name = CoinDesk
 
-NotificationListener_Enable = False ; Jeepney D-Bus listener is mostly placeholder
+NotificationListener_Enable = False 
+; Jeepney D-Bus listener is mostly placeholder
 
-BrowserAgent_Enable = False ; browser-use agent is resource intensive, enable for specific tasks
-BrowserAgent_LLMModel = gemma:7b # Can be same or different from sentiment LLM
+BrowserAgent_Enable = False 
+; browser-use agent is resource intensive, enable for specific tasks
+BrowserAgent_LLMModel = gemma3:12b 
+# Can be same or different from sentiment LLM
 BrowserAgent_MaxSteps = 15
 </code>
 
@@ -1630,48 +1828,10 @@ class Config:
         self.config = configparser.ConfigParser()
         self.secrets = configparser.ConfigParser()
 
-        # Determine absolute paths for config files
-        # Assumes this settings.py is in kamikaze_komodo/config/
-        # So project_root should be one level up from kamikaze_komodo/
-        # current_file_dir = os.path.dirname(os.path.abspath(__file__)) # kamikaze_komodo/config
-        # base_dir = os.path.dirname(current_file_dir) # kamikaze_komodo/
-        # For accessing config files from project root:
-        # For a structure like: project_root/kamikaze_komodo/config/settings.py
-        # If config_file is 'config/config.ini', it's relative to project_root.
-        # If settings.py is in kamikaze_komodo/config/, and config.ini is in kamikaze_komodo/config/
-        # then config_file_rel_path should just be 'config.ini' if base path is kamikaze_komodo/config
-        
-        # Let's assume config_file_rel_path is relative to the project root (kamikaze_komodo's parent)
-        # OR that the script is run from the project root.
-        # For consistency with how app_logger might run, let's assume paths are from where main.py runs (project_root/kamikaze_komodo/)
-        # So config_file path will be 'kamikaze_komodo/config/config.ini'
-        
-        # Simpler: assume execution from parent of kamikaze_komodo, or paths are relative to kamikaze_komodo/ directory
-        # The original code base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) -> kamikaze_komodo/
-        # So config_file='config/config.ini' becomes 'kamikaze_komodo/config/config.ini'
-        
-        # Using the provided relative paths directly, assuming they are correct from execution context (e.g. project root)
-        # This means if main.py is in kamikaze_komodo/, and config is kamikaze_komodo/config/config.ini
-        # then config_file_rel_path should be 'kamikaze_komodo/config/config.ini' if running from one dir above kamikaze_komodo.
-        # Let's stick to making paths relative to `kamikaze_komodo` module's parent, if possible.
-        
-        # The original way:
-        # base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # This is kamikaze_komodo/
-        # self.config_file_path = os.path.join(base_dir, config_file_rel_path) # e.g. kamikaze_komodo/config/config.ini
-        # self.secrets_file_path = os.path.join(base_dir, secrets_file_rel_path) # e.g. kamikaze_komodo/config/secrets.ini
-        
-        # Let's assume current working directory is the project root (parent of kamikaze_komodo folder)
-        # or adjust paths to be absolute if needed.
-        # For now, this structure assumes config_file_rel_path = "kamikaze_komodo/config/config.ini"
-        # if running from project root.
-        # If running main.py from within kamikaze_komodo, then config_file_rel_path="config/config.ini" is fine.
-        # The original code had config_file='config/config.ini' passed to Config constructor.
-        
-        # Let's assume the paths passed are relative from the kamikaze_komodo directory itself.
         script_dir = os.path.dirname(os.path.abspath(__file__)) # .../kamikaze_komodo/config
         project_module_dir = os.path.dirname(script_dir) # .../kamikaze_komodo
-        
-        self.config_file_path = os.path.join(project_module_dir, config_file_rel_path) # e.g. .../kamikaze_komodo/config/config.ini
+
+        self.config_file_path = os.path.join(project_module_dir, config_file_rel_path)
         self.secrets_file_path = os.path.join(project_module_dir, secrets_file_rel_path)
 
         if not os.path.exists(self.config_file_path):
@@ -1679,7 +1839,6 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {self.config_file_path}")
         if not os.path.exists(self.secrets_file_path):
             logger.warning(f"Secrets file not found: {self.secrets_file_path}. Some features might be unavailable.")
-            # Not raising FileNotFoundError for secrets to allow operation if keys not strictly needed.
 
         self.config.read(self.config_file_path)
         self.secrets.read(self.secrets_file_path)
@@ -1700,69 +1859,67 @@ class Config:
         self.historical_data_days: int = self.config.getint('DataFetching', 'HistoricalDataDays', fallback=365)
         self.data_fetch_limit_per_call: int = self.config.getint('DataFetching', 'DataFetchLimitPerCall', fallback=500)
 
-
         # Trading Settings
         self.max_portfolio_risk: float = self.config.getfloat('Trading', 'MaxPortfolioRisk', fallback=0.02)
         self.default_leverage: float = self.config.getfloat('Trading', 'DefaultLeverage', fallback=1.0)
-        self.commission_bps: float = self.config.getfloat('Trading', 'CommissionBPS', fallback=10.0) # 10 bps = 0.1%
-
+        self.commission_bps: float = self.config.getfloat('Trading', 'CommissionBPS', fallback=10.0)
 
         # EWMAC Strategy Settings
         self.ewmac_short_window: int = self.config.getint('EWMAC_Strategy', 'ShortWindow', fallback=12)
         self.ewmac_long_window: int = self.config.getint('EWMAC_Strategy', 'LongWindow', fallback=26)
-        # self.ewmac_signal_window: int = self.config.getint('EWMAC_Strategy', 'SignalWindow', fallback=9) # Not used in current EWMAC
+        self.ewmac_signal_window: int = self.config.getint('EWMAC_Strategy', 'SignalWindow', fallback=9) # For MACD part of EWMAC if used
 
         # --- Phase 3: Risk Management Settings ---
-        self.position_sizer: str = self.config.get('RiskManagement', 'PositionSizer', fallback='FixedFractional')
+        self.position_sizer_type: str = self.config.get('RiskManagement', 'PositionSizer', fallback='FixedFractional')
         self.fixed_fractional_allocation_fraction: float = self.config.getfloat('RiskManagement', 'FixedFractional_AllocationFraction', fallback=0.10)
         self.atr_based_risk_per_trade_fraction: float = self.config.getfloat('RiskManagement', 'ATRBased_RiskPerTradeFraction', fallback=0.01)
         self.atr_based_atr_multiple_for_stop: float = self.config.getfloat('RiskManagement', 'ATRBased_ATRMultipleForStop', fallback=2.0)
 
-        self.stop_manager_default: str = self.config.get('RiskManagement', 'StopManager_Default', fallback='PercentageBased')
+        self.stop_manager_type: str = self.config.get('RiskManagement', 'StopManager_Default', fallback='PercentageBased')
         _sl_pct_str = self.config.get('RiskManagement', 'PercentageStop_LossPct', fallback='0.02')
         self.percentage_stop_loss_pct: Optional[float] = float(_sl_pct_str) if _sl_pct_str and _sl_pct_str.lower() not in ['none', '0', '0.0'] else None
-        
+
         _tp_pct_str = self.config.get('RiskManagement', 'PercentageStop_TakeProfitPct', fallback='0.05')
         self.percentage_stop_take_profit_pct: Optional[float] = float(_tp_pct_str) if _tp_pct_str and _tp_pct_str.lower() not in ['none', '0', '0.0'] else None
-        
+
         self.atr_stop_atr_multiple: float = self.config.getfloat('RiskManagement', 'ATRStop_ATRMultiple', fallback=2.0)
 
-
         # --- Phase 3: Portfolio Constructor Settings ---
-        self.asset_allocator: str = self.config.get('PortfolioConstructor', 'AssetAllocator', fallback='FixedWeight')
-        # Example for default allocation, needs parsing if used for multiple assets
-        self.default_allocation_btcusd: float = self.config.getfloat('PortfolioConstructor', f'DefaultAllocation_{self.default_symbol.replace("/","")}', fallback=1.0)
+        self.asset_allocator_type: str = self.config.get('PortfolioConstructor', 'AssetAllocator', fallback='FixedWeight')
+        self.default_allocation_btcusd: float = self.config.getfloat('PortfolioConstructor', f'DefaultAllocation_{self.default_symbol.replace("/","").replace(":","")}', fallback=1.0)
         self.rebalancer_deviation_threshold: float = self.config.getfloat('PortfolioConstructor', 'Rebalancer_DeviationThreshold', fallback=0.05)
-
 
         # --- Phase 4: AI News Analysis Settings ---
         self.enable_sentiment_analysis: bool = self.config.getboolean('AI_NewsAnalysis', 'EnableSentimentAnalysis', fallback=True)
-        self.sentiment_llm_model: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMModel', fallback='gemma:7b') # Default to smaller gemma
-        self.ollama_base_url: Optional[str] = self.config.get('AI_NewsAnalysis', 'OllamaBaseURL', fallback=None)
-        if self.ollama_base_url and self.ollama_base_url.lower() == 'none': self.ollama_base_url = None
+        self.sentiment_llm_model: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMModel', fallback='gemma:7b')
+        self.ollama_base_url: Optional[str] = self.config.get('AI_NewsAnalysis', 'OllamaBaseURL', fallback="http://localhost:11434")
+        if self.ollama_base_url and self.ollama_base_url.lower() in ['none', '']: self.ollama_base_url = None
 
         self.sentiment_filter_threshold_long: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Long', fallback=0.1)
         self.sentiment_filter_threshold_short: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Short', fallback=-0.1)
         self.simulated_sentiment_data_path: Optional[str] = self.config.get('AI_NewsAnalysis', 'SimulatedSentimentDataPath', fallback=None)
-        if self.simulated_sentiment_data_path and self.simulated_sentiment_data_path.lower() == 'none': self.simulated_sentiment_data_path = None
+        if self.simulated_sentiment_data_path and self.simulated_sentiment_data_path.lower() in ['none', '']: self.simulated_sentiment_data_path = None
+        # Resolve simulated sentiment data path relative to project module dir if it's a relative path
+        if self.simulated_sentiment_data_path and not os.path.isabs(self.simulated_sentiment_data_path):
+            self.simulated_sentiment_data_path = os.path.join(project_module_dir, self.simulated_sentiment_data_path)
 
 
         self.news_scraper_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'NewsScraper_Enable', fallback=True)
         self.rss_feed_cointelegraph: str = self.config.get('AI_NewsAnalysis', 'RSSFeed_CoinTelegraph', fallback='https://cointelegraph.com/rss')
         self.rss_feed_seeking_alpha: str = self.config.get('AI_NewsAnalysis', 'RSSFeed_SeekingAlpha', fallback='https://seekingalpha.com/market_currents.xml')
-        
+
         self.notification_listener_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'NotificationListener_Enable', fallback=False)
         self.browser_agent_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'BrowserAgent_Enable', fallback=False)
         self.browser_agent_llm_model: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMModel', fallback='gemma:7b')
         self.browser_agent_max_steps: int = self.config.getint('AI_NewsAnalysis', 'BrowserAgent_MaxSteps', fallback=15)
 
-
     def get_strategy_params(self, strategy_name: str) -> dict:
-        # (Existing method, no changes needed for now unless strategy params become very dynamic)
         params = {}
-        if self.config.has_section(strategy_name):
-            params = dict(self.config.items(strategy_name))
+        section_name = f"{strategy_name}_Strategy" # Standardize section names like EWMAC_Strategy
+        if self.config.has_section(section_name):
+            params = dict(self.config.items(section_name))
             for key, value in params.items():
+                # Convert to int, float, bool, None where appropriate
                 if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
                     params[key] = int(value)
                 else:
@@ -1773,33 +1930,25 @@ class Config:
                         elif value.lower() == 'false': params[key] = False
                         elif value.lower() == 'none': params[key] = None
         else:
-            logger.warning(f"No configuration section found for strategy: {strategy_name}")
+            logger.warning(f"No specific configuration section found for strategy: {section_name}. Using defaults or globally passed params.")
         return params
-    
+
     def get_news_scraper_config(self) -> Dict[str, Any]:
-        """Constructs a config dictionary for NewsScraper."""
         cfg = {"rss_feeds": [], "websites": []}
         if self.news_scraper_enable:
             if self.rss_feed_cointelegraph:
                 cfg["rss_feeds"].append({"name": "CoinTelegraph RSS", "url": self.rss_feed_cointelegraph})
             if self.rss_feed_seeking_alpha:
                 cfg["rss_feeds"].append({"name": "SeekingAlpha Market Currents", "url": self.rss_feed_seeking_alpha})
-            # Add more RSS feeds or website direct scrape configs from self.config if defined
-            # Example for websites:
-            # if self.config.has_option('AI_NewsAnalysis', 'WebsiteScrape_CoinDesk_URL'):
-            #     cfg["websites"].append({
-            #         "name": self.config.get('AI_NewsAnalysis', 'WebsiteScrape_CoinDesk_Name', fallback='CoinDesk'),
-            #         "url": self.config.get('AI_NewsAnalysis', 'WebsiteScrape_CoinDesk_URL')
-            #     })
+            # Example to read additional websites if configured in a more generic way in config.ini
+            for key, value in self.config.items('AI_NewsAnalysis'):
+                if key.startswith("websitescrape_") and key.endswith("_url"):
+                    site_id = key.replace("websitescrape_", "").replace("_url", "")
+                    site_name = self.config.get('AI_NewsAnalysis', f'WebsiteScrape_{site_id}_Name', fallback=site_id.capitalize())
+                    cfg["websites"].append({"name": site_name, "url": value})
         return cfg
 
-
-# Global config instance
 try:
-    # If main.py is in kamikaze_komodo/, and config is kamikaze_komodo/config/config.ini
-    # The relative path from kamikaze_komodo/config/settings.py to kamikaze_komodo/config/config.ini is just 'config.ini'
-    # However, the constructor logic joins with project_module_dir.
-    # So, if config_file_rel_path is 'config/config.ini', it resolves to 'kamikaze_komodo/config/config.ini'. This is correct.
     settings = Config(config_file_rel_path='config/config.ini', secrets_file_rel_path='config/secrets.ini')
 except FileNotFoundError as e:
     logger.critical(f"Could not initialize settings due to missing configuration file: {e}")
@@ -1808,9 +1957,7 @@ except Exception as e_global:
     logger.critical(f"Failed to initialize Config object: {e_global}", exc_info=True)
     settings = None
 
-
-if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()):
-    # Updated placeholder check
+if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()): # Updated placeholder check
     logger.warning(f"API Key for '{settings.exchange_id_to_use}' appears to be a placeholder or is not configured in secrets.ini. Authenticated interaction will be limited.")
 </code>
 
@@ -1889,7 +2036,9 @@ kamikaze_komodo/core/models.py:
 # Added fields to NewsArticle and Trade as potentially needed by new modules.
 from typing import Optional, List, Dict, Any # Added Any
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone # Added timezone
+from datetime import datetime, timezone
+
+import pydantic # Added timezone
 from kamikaze_komodo.core.enums import OrderType, OrderSide, SignalType, TradeResult
 
 class BarData(BaseModel):
@@ -1956,7 +2105,7 @@ class Trade(BaseModel):
     # Added for ATR based stops or other context
     custom_fields: Dict[str, Any] = Field(default_factory=dict, description="Custom fields for additional trade data, e.g., atr_at_entry")
 
-    @pydantic.validator('exit_price')
+    @pydantic.field_validator('exit_price')
     def exit_price_must_be_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('exit_price must be positive if set')
@@ -2533,65 +2682,86 @@ from typing import Dict, Optional, List
 from kamikaze_komodo.core.enums import OrderType, OrderSide
 from kamikaze_komodo.core.models import Order
 from kamikaze_komodo.app_logger import get_logger
-from kamikaze_komodo.config.settings import settings
-from datetime import datetime
+from kamikaze_komodo.config.settings import settings # Import global settings
+from datetime import datetime, timezone # Ensure timezone is imported
 
 logger = get_logger(__name__)
 
 class ExchangeAPI:
     """
-    Handles interactions with the cryptocurrency exchange (e.g., Kraken).
+    Handles interactions with the cryptocurrency exchange.
     Manages order placement, cancellation, and fetching account information.
     """
-    def __init__(self, exchange_id: str = 'kraken'):
+    def __init__(self, exchange_id: Optional[str] = None): # exchange_id is now optional
         if not settings:
             logger.critical("Settings not loaded. ExchangeAPI cannot be initialized.")
             raise ValueError("Settings not loaded.")
-            
-        self.exchange_id = exchange_id
+
+        self.exchange_id = exchange_id if exchange_id else settings.exchange_id_to_use
         exchange_class = getattr(ccxt, self.exchange_id, None)
         if not exchange_class:
             logger.error(f"Exchange {self.exchange_id} is not supported by CCXT.")
             raise ValueError(f"Exchange {self.exchange_id} is not supported by CCXT.")
 
+        # Determine API keys based on the exchange_id
+        # This example assumes a single set of keys in settings (e.g., KRAKEN_API)
+        # For a multi-exchange system, you'd fetch keys specific to self.exchange_id
+        api_key = settings.kraken_api_key # Defaulting to Kraken keys for now
+        secret_key = settings.kraken_secret_key # Defaulting to Kraken keys
+        use_testnet = settings.kraken_testnet # Defaulting to Kraken testnet setting
+
+        # Example for specific exchange key loading (if settings were structured differently)
+        # if self.exchange_id == 'binance':
+        #     api_key = settings.binance_api_key
+        #     secret_key = settings.binance_secret_key
+        #     use_testnet = settings.binance_testnet
+        # elif self.exchange_id == 'krakenfutures':
+        #     api_key = settings.kraken_futures_api_key # etc.
+
         config = {
-            'apiKey': settings.kraken_api_key,
-            'secret': settings.kraken_secret_key,
+            'apiKey': api_key,
+            'secret': secret_key,
             'enableRateLimit': True,
         }
-        # Add testnet/sandbox configuration if applicable and supported by CCXT for the exchange
-        # if settings.kraken_testnet and self.exchange_id == 'binance':
-        #     config['options'] = {'defaultType': 'future', 'test': True}
-        # Kraken's sandbox typically uses different API keys for a demo account.
 
         self.exchange = exchange_class(config)
-        logger.info(f"Initialized ExchangeAPI for {self.exchange_id}. Testnet mode: {settings.kraken_testnet}")
+        logger.info(f"Initialized ExchangeAPI for {self.exchange_id}.")
 
-        if not settings.kraken_api_key or settings.kraken_api_key == "YOUR_API_KEY_REPLACE_ME":
-            logger.warning(f"API keys for {self.exchange_id} are not properly set. Authenticated calls will fail.")
+        if use_testnet:
+            if hasattr(self.exchange, 'set_sandbox_mode') and callable(self.exchange.set_sandbox_mode):
+                try:
+                    self.exchange.set_sandbox_mode(True)
+                    logger.info(f"Sandbox mode enabled for {self.exchange_id}.")
+                except ccxt.NotSupported:
+                    logger.warning(f"{self.exchange_id} does not support unified set_sandbox_mode. Testnet functionality depends on API keys/URL.")
+                except Exception as e_sandbox:
+                    logger.error(f"Error setting sandbox mode for {self.exchange_id}: {e_sandbox}")
+            else:
+                logger.warning(f"{self.exchange_id} does not have set_sandbox_mode. Testnet relies on specific API keys or default URL pointing to sandbox.")
+        else:
+            logger.info(f"Running in live mode for {self.exchange_id}.")
 
+
+        if not api_key or "YOUR_API_KEY" in str(api_key).upper() or (isinstance(api_key, str) and "D27PYGI95TLS" in api_key.upper()): # Check specific placeholder
+            logger.warning(f"API key for {self.exchange_id} appears to be a placeholder or is not configured. Authenticated calls may fail.")
 
     async def fetch_balance(self) -> Optional[Dict]:
-        """
-        Fetches the account balance from the exchange.
-        Returns:
-            Optional[Dict]: A dictionary representing the account balance, or None on error.
-                            The structure is defined by CCXT's fetch_balance method.
-        """
         if not self.exchange.has['fetchBalance']:
             logger.error(f"{self.exchange_id} does not support fetchBalance.")
             return None
         try:
             balance = await self.exchange.fetch_balance()
             logger.info(f"Successfully fetched balance from {self.exchange_id}.")
-            # logger.debug(f"Balance details: {balance}") # Can be very verbose
             return balance
         except ccxt.NetworkError as e:
-            logger.error(f"Network error fetching balance: {e}")
+            logger.error(f"Network error fetching balance: {e}", exc_info=True)
+        except ccxt.AuthenticationError as e_auth:
+            logger.error(f"Authentication error fetching balance from {self.exchange_id}. Check API keys and permissions: {e_auth}", exc_info=True)
+            return None # Explicitly return None on auth error
         except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error fetching balance: {e}")
+            logger.error(f"Exchange error fetching balance: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"An unexpected error occurred fetching balance: {e}")
+            logger.error(f"An unexpected error occurred fetching balance: {e}", exc_info=True)
         return None
 
     async def create_order(
@@ -2603,24 +2773,10 @@ class ExchangeAPI:
         price: Optional[float] = None,
         params: Optional[Dict] = None
     ) -> Optional[Order]:
-        """
-        Places an order on the exchange.
-
-        Args:
-            symbol (str): Trading symbol (e.g., 'BTC/USD').
-            order_type (OrderType): Type of order (market, limit).
-            side (OrderSide): 'buy' or 'sell'.
-            amount (float): Quantity of the asset to trade.
-            price (Optional[float]): Price for limit orders. Required if order_type is LIMIT.
-            params (Optional[Dict]): Additional parameters for the exchange.
-
-        Returns:
-            Optional[Order]: An Order object representing the placed order, or None on error.
-        """
         if order_type == OrderType.LIMIT and price is None:
             logger.error("Price must be specified for a LIMIT order.")
             return None
-        
+
         if not self.exchange.has['createOrder']:
             logger.error(f"{self.exchange_id} does not support createOrder.")
             return None
@@ -2629,11 +2785,12 @@ class ExchangeAPI:
         side_str = side.value
 
         try:
-            logger.info(f"Attempting to place {side_str} {order_type_str} order for {amount} {symbol} at price {price if price else 'market'}")
-            
-            # Placeholder: Simulate order creation if in testnet and keys are dummy
-            if settings.kraken_testnet and (not settings.kraken_api_key or "YOUR_API_KEY" in settings.kraken_api_key):
-                logger.warning("Simulating order creation due to testnet mode and dummy API keys.")
+            logger.info(f"Attempting to place {side_str} {order_type_str} order for {amount} {symbol} at price {price if price else 'market'} on {self.exchange_id}")
+
+            # Check for placeholder API keys again before actual call
+            is_placeholder_key = not self.exchange.apiKey or "YOUR_API_KEY" in self.exchange.apiKey.upper() or "D27PYGI95TLS" in self.exchange.apiKey.upper()
+            if settings.kraken_testnet and is_placeholder_key : # Use general testnet flag
+                logger.warning(f"Simulating order creation for {self.exchange_id} due to testnet mode and placeholder API keys.")
                 simulated_order_id = f"sim_{self.exchange_id}_{ccxt.Exchange.uuid()}"
                 return Order(
                     id=simulated_order_id,
@@ -2641,116 +2798,96 @@ class ExchangeAPI:
                     type=order_type,
                     side=side,
                     amount=amount,
-                    price=price if order_type == OrderType.LIMIT else None, # Market orders might not have a 'creation' price
-                    timestamp=datetime.utcnow(),
-                    status="open", # Simulated as open initially
+                    price=price if order_type == OrderType.LIMIT else None,
+                    timestamp=datetime.now(timezone.utc), # Use timezone.utc
+                    status="open",
                     exchange_id=simulated_order_id
                 )
 
-            # Actual order creation
-            exchange_order = await self.exchange.create_order(symbol, order_type_str, side_str, amount, price, params or {})
-            logger.info(f"Successfully placed order on {self.exchange_id}. Order ID: {exchange_order.get('id')}")
-            
-            # Map CCXT order response to our Order model
-            # This mapping can be quite detailed depending on the exchange response.
+            exchange_order_response = await self.exchange.create_order(symbol, order_type_str, side_str, amount, price, params or {})
+            logger.info(f"Successfully placed order on {self.exchange_id}. Order ID: {exchange_order_response.get('id')}")
+
             created_order = Order(
-                id=str(exchange_order.get('id')),
-                symbol=exchange_order.get('symbol'),
-                type=OrderType(exchange_order.get('type', order_type_str).lower()),
-                side=OrderSide(exchange_order.get('side', side_str).lower()),
-                amount=float(exchange_order.get('amount', amount)),
-                price=float(exchange_order['price']) if exchange_order.get('price') else None,
-                timestamp=datetime.fromtimestamp(exchange_order['timestamp'] / 1000, tz=timezone.utc) if exchange_order.get('timestamp') else datetime.utcnow(),
-                status=exchange_order.get('status', 'open'),
-                filled_amount=float(exchange_order.get('filled', 0.0)),
-                average_fill_price=float(exchange_order.get('average')) if exchange_order.get('average') else None,
-                exchange_id=str(exchange_order.get('id'))
+                id=str(exchange_order_response.get('id')),
+                symbol=exchange_order_response.get('symbol'),
+                type=OrderType(exchange_order_response.get('type', order_type_str).lower()),
+                side=OrderSide(exchange_order_response.get('side', side_str).lower()),
+                amount=float(exchange_order_response.get('amount', amount)),
+                price=float(exchange_order_response['price']) if exchange_order_response.get('price') else None,
+                timestamp=datetime.fromtimestamp(exchange_order_response['timestamp'] / 1000, tz=timezone.utc) if exchange_order_response.get('timestamp') else datetime.now(timezone.utc),
+                status=exchange_order_response.get('status', 'open'),
+                filled_amount=float(exchange_order_response.get('filled', 0.0)),
+                average_fill_price=float(exchange_order_response.get('average')) if exchange_order_response.get('average') else None,
+                exchange_id=str(exchange_order_response.get('id'))
             )
             return created_order
 
         except ccxt.InsufficientFunds as e:
-            logger.error(f"Insufficient funds to place order for {symbol}: {e}")
+            logger.error(f"Insufficient funds to place order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
         except ccxt.InvalidOrder as e:
-            logger.error(f"Invalid order parameters for {symbol}: {e}")
+            logger.error(f"Invalid order parameters for {symbol} on {self.exchange_id}: {e}", exc_info=True)
+        except ccxt.AuthenticationError as e_auth:
+            logger.error(f"Authentication error placing order for {symbol} on {self.exchange_id}. Check API keys: {e_auth}", exc_info=True)
         except ccxt.NetworkError as e:
-            logger.error(f"Network error placing order for {symbol}: {e}")
-        except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error placing order for {symbol}: {e}")
+            logger.error(f"Network error placing order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
+        except ccxt.ExchangeError as e: # Catch specific exchange errors before generic Exception
+            logger.error(f"Exchange error placing order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"An unexpected error occurred placing order for {symbol}: {e}")
+            logger.error(f"An unexpected error occurred placing order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
         return None
 
     async def cancel_order(self, order_id: str, symbol: Optional[str] = None, params: Optional[Dict] = None) -> bool:
-        """
-        Cancels an open order on the exchange.
-
-        Args:
-            order_id (str): The ID of the order to cancel.
-            symbol (Optional[str]): The trading symbol (required by some exchanges for cancelOrder).
-            params (Optional[Dict]): Additional parameters for the exchange.
-
-        Returns:
-            bool: True if the order was successfully canceled, False otherwise.
-        """
         if not self.exchange.has['cancelOrder']:
             logger.error(f"{self.exchange_id} does not support cancelOrder.")
             return False
         try:
-            # Some exchanges require symbol for cancelOrder, others don't.
-            # CCXT unified API for cancel_order(id, symbol=None, params={})
             await self.exchange.cancel_order(order_id, symbol, params or {})
             logger.info(f"Successfully requested cancellation for order ID {order_id} on {self.exchange_id}.")
-            return True # Note: Cancellation might be a request; status needs to be confirmed by fetch_order.
+            return True
         except ccxt.OrderNotFound as e:
-            logger.error(f"Order ID {order_id} not found for cancellation: {e}")
+            logger.error(f"Order ID {order_id} not found for cancellation on {self.exchange_id}: {e}", exc_info=True)
         except ccxt.NetworkError as e:
-            logger.error(f"Network error canceling order {order_id}: {e}")
+            logger.error(f"Network error canceling order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         except ccxt.ExchangeError as e:
-            logger.error(f"Exchange error canceling order {order_id}: {e}")
+            logger.error(f"Exchange error canceling order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"An unexpected error occurred canceling order {order_id}: {e}")
+            logger.error(f"An unexpected error occurred canceling order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         return False
 
     async def fetch_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
-        """
-        Fetches information about a specific order.
-        """
         if not self.exchange.has['fetchOrder']:
             logger.warning(f"{self.exchange_id} does not support fetching individual orders directly.")
             return None
         try:
-            exchange_order = await self.exchange.fetch_order(order_id, symbol)
-            # Map to internal Order model
+            exchange_order_response = await self.exchange.fetch_order(order_id, symbol)
             fetched_order = Order(
-                id=str(exchange_order.get('id')),
-                symbol=exchange_order.get('symbol'),
-                type=OrderType(exchange_order.get('type').lower()),
-                side=OrderSide(exchange_order.get('side').lower()),
-                amount=float(exchange_order.get('amount')),
-                price=float(exchange_order['price']) if exchange_order.get('price') else None,
-                timestamp=datetime.fromtimestamp(exchange_order['timestamp'] / 1000, tz=timezone.utc) if exchange_order.get('timestamp') else datetime.utcnow(),
-                status=exchange_order.get('status'),
-                filled_amount=float(exchange_order.get('filled', 0.0)),
-                average_fill_price=float(exchange_order.get('average')) if exchange_order.get('average') else None,
-                exchange_id=str(exchange_order.get('id'))
+                id=str(exchange_order_response.get('id')),
+                symbol=exchange_order_response.get('symbol'),
+                type=OrderType(exchange_order_response.get('type').lower()),
+                side=OrderSide(exchange_order_response.get('side').lower()),
+                amount=float(exchange_order_response.get('amount')),
+                price=float(exchange_order_response['price']) if exchange_order_response.get('price') else None,
+                timestamp=datetime.fromtimestamp(exchange_order_response['timestamp'] / 1000, tz=timezone.utc) if exchange_order_response.get('timestamp') else datetime.now(timezone.utc),
+                status=exchange_order_response.get('status'),
+                filled_amount=float(exchange_order_response.get('filled', 0.0)),
+                average_fill_price=float(exchange_order_response.get('average')) if exchange_order_response.get('average') else None,
+                exchange_id=str(exchange_order_response.get('id'))
             )
             return fetched_order
         except ccxt.OrderNotFound:
             logger.warning(f"Order {order_id} not found on {self.exchange_id}.")
         except Exception as e:
-            logger.error(f"Error fetching order {order_id}: {e}")
+            logger.error(f"Error fetching order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         return None
 
-    async def fetch_open_orders(self, symbol: Optional[str] = None, since: Optional[int] = None, limit: Optional[int] = None) -> List[Order]:
-        """
-        Fetches all open orders for a given symbol or all symbols.
-        """
+    async def fetch_open_orders(self, symbol: Optional[str] = None, since: Optional[datetime] = None, limit: Optional[int] = None) -> List[Order]: # Changed since to datetime
         open_orders_list = []
         if not self.exchange.has['fetchOpenOrders']:
             logger.warning(f"{self.exchange_id} does not support fetching open orders.")
             return open_orders_list
         try:
-            raw_orders = await self.exchange.fetch_open_orders(symbol, since, limit)
+            since_timestamp_ms = int(since.timestamp() * 1000) if since else None
+            raw_orders = await self.exchange.fetch_open_orders(symbol, since_timestamp_ms, limit)
             for ex_order in raw_orders:
                 order = Order(
                     id=str(ex_order.get('id')),
@@ -2759,27 +2896,25 @@ class ExchangeAPI:
                     side=OrderSide(ex_order.get('side').lower()),
                     amount=float(ex_order.get('amount')),
                     price=float(ex_order['price']) if ex_order.get('price') else None,
-                    timestamp=datetime.fromtimestamp(ex_order['timestamp'] / 1000, tz=timezone.utc) if ex_order.get('timestamp') else datetime.utcnow(),
+                    timestamp=datetime.fromtimestamp(ex_order['timestamp'] / 1000, tz=timezone.utc) if ex_order.get('timestamp') else datetime.now(timezone.utc),
                     status=ex_order.get('status', 'open'),
                     filled_amount=float(ex_order.get('filled', 0.0)),
                     average_fill_price=float(ex_order.get('average')) if ex_order.get('average') else None,
                     exchange_id=str(ex_order.get('id'))
                 )
                 open_orders_list.append(order)
-            logger.info(f"Fetched {len(open_orders_list)} open orders for symbol {symbol if symbol else 'all'}.")
+            logger.info(f"Fetched {len(open_orders_list)} open orders for symbol {symbol if symbol else 'all'} on {self.exchange_id}.")
         except Exception as e:
-            logger.error(f"Error fetching open orders: {e}")
+            logger.error(f"Error fetching open orders on {self.exchange_id}: {e}", exc_info=True)
         return open_orders_list
 
-
     async def close(self):
-        """Closes the CCXT exchange connection."""
         try:
             if hasattr(self.exchange, 'close') and callable(self.exchange.close):
                 await self.exchange.close()
-            logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
+                logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
         except Exception as e:
-            logger.error(f"Error closing CCXT exchange connection: {e}")
+            logger.error(f"Error closing CCXT exchange connection for {self.exchange_id}: {e}", exc_info=True)
 
 # Example Usage (run within an asyncio event loop):
 async def main_exchange_api_example():
@@ -2787,62 +2922,29 @@ async def main_exchange_api_example():
         print("Settings could not be loaded. Exiting example.")
         return
 
-    exchange_api = ExchangeAPI(exchange_id='kraken')
+    exchange_api = ExchangeAPI() # Uses exchange_id from settings
 
-    # Fetch balance
     balance = await exchange_api.fetch_balance()
     if balance:
-        # Log specific free balances if needed, e.g., USD, BTC
-        logger.info(f"Free USD Balance: {balance.get('USD', {}).get('free', 0)}")
-        logger.info(f"Free BTC Balance: {balance.get('BTC', {}).get('free', 0)}")
-    
-    # Example: Place a practice order (simulated if keys are dummy)
-    # Ensure the symbol and amounts are reasonable for testing.
-    # Kraken typically requires minimum order sizes. E.g., BTC/USD might need > 0.0001 BTC
-    # This will likely fail with "InsufficientFunds" or "InvalidOrder" on a live account without funds or proper setup.
-    
-    # For actual testing with dummy keys, the simulation path in create_order will be hit.
-    # If you have paper trading keys, replace the placeholders in secrets.ini.
-    
-    # target_symbol = settings.default_symbol # e.g. 'BTC/USD'
+        logger.info(f"Free USD Balance: {balance.get('USD', {}).get('free', 'N/A')}")
+        logger.info(f"Free {settings.default_symbol.split('/')[0]} Balance: {balance.get(settings.default_symbol.split('/')[0], {}).get('free', 'N/A')}")
+
+    # target_symbol = settings.default_symbol
     # order_to_place = await exchange_api.create_order(
     #     symbol=target_symbol,
-    #     order_type=OrderType.LIMIT, # Use LIMIT to avoid unexpected fills with market orders
+    #     order_type=OrderType.LIMIT,
     #     side=OrderSide.BUY,
-    #     amount=0.0001,  # Example small amount, check Kraken's minimums
-    #     price=15000.0   # Example very low price for a limit buy to ensure it doesn't fill immediately
+    #     amount=0.0001,
+    #     price=15000.0
     # )
-
     # if order_to_place:
     #     logger.info(f"Practice order placed/simulated: ID {order_to_place.id}, Status {order_to_place.status}")
-        
-    #     # Fetch the status of this specific order
-    #     await asyncio.sleep(2) # Give some time for order to register (if live)
-    #     fetched_order_status = await exchange_api.fetch_order(order_to_place.id, order_to_place.symbol)
-    #     if fetched_order_status:
-    #         logger.info(f"Fetched status for order {fetched_order_status.id}: {fetched_order_status.status}")
-
-    #     # Try to cancel the order
-    #     # if order_to_place.status == 'open' or "sim_" in order_to_place.id: # Only cancel if open or simulated
-    #     #     logger.info(f"Attempting to cancel order: {order_to_place.id}")
-    #     #     cancel_success = await exchange_api.cancel_order(order_to_place.id, order_to_place.symbol)
-    #     #     logger.info(f"Cancellation request for order {order_to_place.id} successful: {cancel_success}")
     # else:
     #     logger.warning("Practice order placement failed or was not attempted.")
-
     await exchange_api.close()
 
-if __name__ == '__main__':
-    # Standalone test
-    # from kamikaze_komodo.config.settings import Config
-    # settings_instance = Config(config_file='../config/config.ini', secrets_file='../config/secrets.ini')
-    # global settings
-    # settings = settings_instance
-    # if settings:
-    #    asyncio.run(main_exchange_api_example())
-    # else:
-    #    print("Failed to load settings for standalone exchange_api example.")
-    pass
+# if __name__ == '__main__':
+#     asyncio.run(main_exchange_api_example())
 </code>
 
 kamikaze_komodo/exchange_interaction/__init__.py:
@@ -2855,7 +2957,7 @@ kamikaze_komodo/portfolio_constructor/asset_allocator.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/asset_allocator.py
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from kamikaze_komodo.core.models import BarData # Or other relevant models
 from kamikaze_komodo.app_logger import get_logger
 
@@ -3644,8 +3746,6 @@ kamikaze_komodo/strategy_framework/__init__.py:
 kamikaze_komodo/strategy_framework/strategies/ewmac.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/ewmac.py
-# Updated to use sentiment score as a filter
-
 import pandas as pd
 import pandas_ta as ta
 from typing import Dict, Any, Optional
@@ -3659,43 +3759,63 @@ logger = get_logger(__name__)
 class EWMACStrategy(BaseStrategy):
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(symbol, timeframe, params)
-        self.short_window = self.params.get('short_window', 12)
-        self.long_window = self.params.get('long_window', 26)
-        
-        # Phase 4: Sentiment filter thresholds from params (or use global settings via BacktestingEngine)
-        # These are strategy-specific parameters now.
-        self.sentiment_filter_long_threshold = self.params.get('sentiment_filter_long_threshold', None) # e.g. 0.1
-        self.sentiment_filter_short_threshold = self.params.get('sentiment_filter_short_threshold', None) # e.g. -0.1
+        # Access params using lowercase keys, as configparser.items() typically lowercases them
+        self.short_window = int(self.params.get('shortwindow', 12)) # Changed to lowercase
+        self.long_window = int(self.params.get('longwindow', 26))   # Changed to lowercase
+        self.atr_period = int(self.params.get('atr_period', 14)) # Already lowercase in config by convention, but ensure consistency
+
+        # Sentiment thresholds are often passed directly into params by main.py, preserving case.
+        # If they were meant to be read from strategy's own config section, they'd also be lowercase.
+        self.sentiment_filter_long_threshold = self.params.get('sentiment_filter_long_threshold')
+        if isinstance(self.sentiment_filter_long_threshold, str):
+            try:
+                self.sentiment_filter_long_threshold = None if self.sentiment_filter_long_threshold.lower() == 'none' else float(self.sentiment_filter_long_threshold)
+            except ValueError:
+                logger.warning(f"Could not parse sentiment_filter_long_threshold '{self.params.get('sentiment_filter_long_threshold')}' to float. Defaulting to None.")
+                self.sentiment_filter_long_threshold = None
+
+
+        self.sentiment_filter_short_threshold = self.params.get('sentiment_filter_short_threshold')
+        if isinstance(self.sentiment_filter_short_threshold, str):
+            try:
+                self.sentiment_filter_short_threshold = None if self.sentiment_filter_short_threshold.lower() == 'none' else float(self.sentiment_filter_short_threshold)
+            except ValueError:
+                logger.warning(f"Could not parse sentiment_filter_short_threshold '{self.params.get('sentiment_filter_short_threshold')}' to float. Defaulting to None.")
+                self.sentiment_filter_short_threshold = None
+
 
         if not isinstance(self.short_window, int) or not isinstance(self.long_window, int):
             raise ValueError("EWMACStrategy: 'short_window' and 'long_window' must be integers.")
         if self.short_window >= self.long_window:
             raise ValueError("EWMACStrategy: 'short_window' must be less than 'long_window'.")
-            
+
         logger.info(
             f"Initialized EWMACStrategy for {symbol} ({timeframe}) "
-            f"with Short EMA: {self.short_window}, Long EMA: {self.long_window}. "
-            f"Sentiment Long Threshold: {self.sentiment_filter_long_threshold}, Short Threshold: {self.sentiment_filter_short_threshold}"
+            f"with Short EMA: {self.short_window}, Long EMA: {self.long_window}, ATR Period: {self.atr_period}. "
+            f"Sentiment Long Thresh: {self.sentiment_filter_long_threshold}, Short Thresh: {self.sentiment_filter_short_threshold}"
         )
         self.current_position_status: Optional[SignalType] = None
 
+    # ... rest of the EWMACStrategy class remains the same as previous correct version ...
+    # Ensure _calculate_indicators and on_bar_data methods are complete
 
-    def _calculate_emas_and_atr(self, data_df: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_indicators(self, data_df: pd.DataFrame) -> pd.DataFrame: 
         if data_df.empty: return data_df
         df = data_df.copy()
-        
+
         if 'close' not in df.columns or len(df) < self.long_window :
-            # logger.warning(f"Not enough data ({len(df)}) or missing 'close' column for EMAs.")
-            return df # Return original if not enough data
+            return df 
 
         df[f'ema_short'] = ta.ema(df['close'], length=self.short_window)
         df[f'ema_long'] = ta.ema(df['close'], length=self.long_window)
-        
-        # Calculate ATR if HLC columns available - for position sizing or ATR stops later
+
         if all(col in df.columns for col in ['high', 'low', 'close']):
-            atr_period = self.params.get('atr_period', 14) # Common ATR period
-            if len(df) >= atr_period:
-                 df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=atr_period)
+            if len(df) >= self.atr_period:
+                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
+            else:
+                df['atr'] = pd.NA 
+        else:
+            df['atr'] = pd.NA 
         return df
 
     def generate_signals(self, data: pd.DataFrame, sentiment_series: Optional[pd.Series] = None) -> pd.Series:
@@ -3703,22 +3823,20 @@ class EWMACStrategy(BaseStrategy):
             logger.warning(f"Not enough historical data for EWMAC signals. Need {self.long_window}, got {len(data)}.")
             return pd.Series(index=data.index, dtype='object')
 
-        df_processed = self._calculate_emas_and_atr(data)
+        df_processed = self._calculate_indicators(data)
         if 'ema_short' not in df_processed.columns or 'ema_long' not in df_processed.columns:
-            return pd.Series(index=data.index, dtype='object') # Not enough data from _calculate_emas
+            return pd.Series(index=data.index, dtype='object') 
 
-        # Incorporate sentiment if provided
         if sentiment_series is not None and not sentiment_series.empty:
             df_processed = df_processed.join(sentiment_series.rename('sentiment_score'), how='left')
-            df_processed['sentiment_score'] = df_processed['sentiment_score'].fillna(0.0) # Default to neutral if no sentiment
-        elif 'sentiment_score' not in df_processed.columns: # If not passed and not in original data
-             df_processed['sentiment_score'] = 0.0
-
+            df_processed['sentiment_score'] = df_processed['sentiment_score'].fillna(0.0) 
+        elif 'sentiment_score' not in df_processed.columns: 
+            df_processed['sentiment_score'] = 0.0
 
         signals = pd.Series(index=df_processed.index, dtype='object').fillna(SignalType.HOLD)
-        current_pos_state = None # None, LONG
+        current_pos_state = None 
 
-        for i in range(1, len(df_processed)): # Start from 1 to use shift(1) or iloc[-2] logic
+        for i in range(1, len(df_processed)): 
             prev_short_ema = df_processed['ema_short'].iloc[i-1]
             curr_short_ema = df_processed['ema_short'].iloc[i]
             prev_long_ema = df_processed['ema_long'].iloc[i-1]
@@ -3727,48 +3845,45 @@ class EWMACStrategy(BaseStrategy):
             current_sentiment = df_processed['sentiment_score'].iloc[i]
 
             if pd.isna(curr_short_ema) or pd.isna(curr_long_ema) or pd.isna(prev_short_ema) or pd.isna(prev_long_ema):
-                signals.iloc[i] = SignalType.HOLD # Not enough data for EMAs yet
+                signals.iloc[i] = SignalType.HOLD 
                 continue
 
-            # Golden Cross (Buy Signal)
             is_golden_cross = curr_short_ema > curr_long_ema and prev_short_ema <= prev_long_ema
-            # Death Cross (Sell Signal for Long)
             is_death_cross = curr_short_ema < curr_long_ema and prev_short_ema >= prev_long_ema
 
-            if current_pos_state != SignalType.LONG: # If not in a long position
+            if current_pos_state != SignalType.LONG: 
                 if is_golden_cross:
-                    # Apply sentiment filter for LONG entry
                     if self.sentiment_filter_long_threshold is None or current_sentiment >= self.sentiment_filter_long_threshold:
                         signals.iloc[i] = SignalType.LONG
                         current_pos_state = SignalType.LONG
                     else:
-                        logger.debug(f"{df_processed.index[i]} - EWMAC LONG signal suppressed by sentiment ({current_sentiment:.2f} < {self.sentiment_filter_long_threshold})")
-                        signals.iloc[i] = SignalType.HOLD # Suppressed by sentiment
-                else: # No cross or death cross when not in position
+                        signals.iloc[i] = SignalType.HOLD 
+                else: 
                     signals.iloc[i] = SignalType.HOLD
             
-            elif current_pos_state == SignalType.LONG: # If currently in a long position
+            elif current_pos_state == SignalType.LONG: 
                 if is_death_cross:
                     signals.iloc[i] = SignalType.CLOSE_LONG
-                    current_pos_state = None # Exited position
-                else: # No death cross, remain in position
-                    signals.iloc[i] = SignalType.HOLD # Explicitly HOLD if in position
+                    current_pos_state = None 
+                else: 
+                    signals.iloc[i] = SignalType.HOLD 
 
         logger.info(f"Generated EWMAC signals (vectorized). Longs: {signals.eq(SignalType.LONG).sum()}, CloseLongs: {signals.eq(SignalType.CLOSE_LONG).sum()}")
         return signals
 
-
     def on_bar_data(self, bar_data: BarData, sentiment_score: Optional[float] = None) -> Optional[SignalType]:
-        self.update_data_history(bar_data) # Adds new bar, including its .atr or .sentiment_score if populated by engine
+        self.update_data_history(bar_data) 
 
-        if len(self.data_history) < self.long_window + 1: # Need at least 2 points for EMAs for crossover
+        if len(self.data_history) < self.long_window + 1: 
             return SignalType.HOLD
 
-        df_with_indicators = self._calculate_emas_and_atr(self.data_history)
+        df_with_indicators = self._calculate_indicators(self.data_history)
         
-        # BarData might have sentiment_score from engine, or use passed one
+        if 'atr' in df_with_indicators.columns and pd.notna(df_with_indicators['atr'].iloc[-1]):
+            bar_data.atr = df_with_indicators['atr'].iloc[-1]
+        
         current_sentiment = sentiment_score if sentiment_score is not None else bar_data.sentiment_score
-        if current_sentiment is None: current_sentiment = 0.0 # Default to neutral
+        if current_sentiment is None: current_sentiment = 0.0 
 
 
         if df_with_indicators.empty or 'ema_short' not in df_with_indicators.columns or \
@@ -3786,33 +3901,27 @@ class EWMACStrategy(BaseStrategy):
 
         signal_to_return = SignalType.HOLD
 
-        # Entry Condition (Golden Cross)
         is_golden_cross = latest_ema_short > latest_ema_long and prev_ema_short <= prev_ema_long
         if is_golden_cross and self.current_position_status != SignalType.LONG:
-            # Apply sentiment filter for LONG entry
             if self.sentiment_filter_long_threshold is None or current_sentiment >= self.sentiment_filter_long_threshold:
                 signal_to_return = SignalType.LONG
                 self.current_position_status = SignalType.LONG
-                logger.info(f"{bar_data.timestamp} - EWMAC LONG signal for {self.symbol}. Sentiment: {current_sentiment:.2f}. ShortEMA: {latest_ema_short:.2f}, LongEMA: {latest_ema_long:.2f}")
+                logger.info(f"{bar_data.timestamp} - EWMAC LONG for {self.symbol}. Sent: {current_sentiment:.2f}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
             else:
-                logger.info(f"{bar_data.timestamp} - EWMAC potential LONG for {self.symbol} SUPPRESSED by sentiment ({current_sentiment:.2f} < threshold {self.sentiment_filter_long_threshold}).")
+                logger.info(f"{bar_data.timestamp} - EWMAC LONG for {self.symbol} SUPPRESSED by sentiment ({current_sentiment:.2f} < {self.sentiment_filter_long_threshold}).")
                 signal_to_return = SignalType.HOLD
 
-
-        # Exit Condition (Death Cross)
         is_death_cross = latest_ema_short < latest_ema_long and prev_ema_short >= prev_ema_long
         if is_death_cross and self.current_position_status == SignalType.LONG:
             signal_to_return = SignalType.CLOSE_LONG
-            self.current_position_status = None # Position closed
-            logger.info(f"{bar_data.timestamp} - EWMAC CLOSE_LONG signal for {self.symbol}. ShortEMA: {latest_ema_short:.2f}, LongEMA: {latest_ema_long:.2f}")
+            self.current_position_status = None 
+            logger.info(f"{bar_data.timestamp} - EWMAC CLOSE_LONG for {self.symbol}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}")
         
-        # If already in a position and no exit signal, hold.
-        elif self.current_position_status == SignalType.LONG and signal_to_return == SignalType.HOLD : # no death cross
-             pass # signal_to_return remains HOLD
+        elif self.current_position_status == SignalType.LONG and signal_to_return == SignalType.HOLD : 
+            pass 
 
-        # If no current position and no entry signal, hold
         elif self.current_position_status is None and signal_to_return == SignalType.HOLD:
-             pass # signal_to_return remains HOLD
+            pass 
 
         return signal_to_return
 </code>
