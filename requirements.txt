@@ -26,6 +26,7 @@ httpx>=0.23 # For async requests in NewsScraper
 
 # For Phase 4+ (AI/ML)
 langchain-core>=0.1 # Core Langchain components
+langchain-google-vertexai
 langchain-ollama>=0.1 # For Ollama integration with Langchain
 ollama>=0.1 # Direct Ollama client, if needed separately
 beautifulsoup4>=4.9 # For HTML parsing

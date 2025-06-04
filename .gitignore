@@ -24,7 +24,7 @@ kamikaze_komodo/logs/
 
 # Secrets / Sensitive Configuration
 # IMPORTANT: Make sure secrets.ini is NEVER committed
-kamikaze_komodo/config/secrets.ini
+#kamikaze_komodo/config/secrets.ini
 
 # IDE / Editor specific files
 .vscode/
