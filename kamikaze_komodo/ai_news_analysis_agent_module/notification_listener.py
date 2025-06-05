@@ -97,7 +97,7 @@ class NotificationListener:
         """
         Parses the D-Bus notification data (signal body for Notify) into a structured dictionary.
         Standard Notify signature: (app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout)
-                                  (s, u, s, s, s, as, a{sv}, i)
+                                    (s, u, s, s, s, as, a{sv}, i)
         """
         try:
             if isinstance(notification_body, tuple) and len(notification_body) == 8:

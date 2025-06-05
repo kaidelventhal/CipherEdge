@@ -4,10 +4,8 @@
 from typing import Optional, List, Dict, Any # Added Any
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
-
 import pydantic # Added timezone
 from kamikaze_komodo.core.enums import OrderType, OrderSide, SignalType, TradeResult
-
 class BarData(BaseModel):
     """
     Represents OHLCV market data for a specific time interval.
@@ -28,12 +26,9 @@ class BarData(BaseModel):
     # Fields for ML predictions (Phase 5)
     prediction_value: Optional[float] = Field(None, description="Predicted value by an ML model (e.g., future price, return)")
     prediction_confidence: Optional[float] = Field(None, description="Confidence of the ML prediction (0.0 to 1.0)")
-
-
     class Config:
         frozen = False # Allow modification by strategies/engine (e.g. to add ATR or predictions)
         
-
 class Order(BaseModel):
     # ... (no changes from existing)
     id: str = Field(..., description="Unique order identifier (from exchange or internal)")
@@ -47,8 +42,6 @@ class Order(BaseModel):
     filled_amount: float = Field(0.0, ge=0, description="Amount of the order that has been filled")
     average_fill_price: Optional[float] = Field(None, description="Average price at which the order was filled")
     exchange_id: Optional[str] = Field(None, description="Order ID from the exchange")
-
-
 class Trade(BaseModel):
     """
     Represents an executed trade.
@@ -70,13 +63,11 @@ class Trade(BaseModel):
     notes: Optional[str] = Field(None, description="Any notes related to the trade")
     # Added for ATR based stops or other context
     custom_fields: Dict[str, Any] = Field(default_factory=dict, description="Custom fields for additional trade data, e.g., atr_at_entry")
-
     @pydantic.field_validator('exit_price')
     def exit_price_must_be_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('exit_price must be positive if set')
         return v
-
 class NewsArticle(BaseModel):
     """
     Represents a news article relevant to market analysis.
@@ -98,8 +89,6 @@ class NewsArticle(BaseModel):
     
     related_symbols: Optional[List[str]] = Field(default_factory=list, description="Cryptocurrencies mentioned or related")
     raw_llm_response: Optional[Dict[str, Any]] = Field(None, description="Raw response from LLM for sentiment if available")
-
-
 class PortfolioSnapshot(BaseModel):
     # ... (no changes from existing)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

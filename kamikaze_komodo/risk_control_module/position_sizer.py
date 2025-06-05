@@ -3,9 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Optional, Any
 from kamikaze_komodo.core.models import BarData # For ATR based sizers potentially
 from kamikaze_komodo.app_logger import get_logger
-
 logger = get_logger(__name__)
-
 class BasePositionSizer(ABC):
     """
     Abstract base class for position sizing strategies.
@@ -13,7 +11,6 @@ class BasePositionSizer(ABC):
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         self.params = params if params is not None else {}
         logger.info(f"{self.__class__.__name__} initialized with params: {self.params}")
-
     @abstractmethod
     def calculate_size(
         self,
@@ -27,7 +24,6 @@ class BasePositionSizer(ABC):
     ) -> Optional[float]: # Returns position size in asset units, or None if no trade
         """
         Calculates the size of the position to take.
-
         Args:
             symbol (str): The asset symbol.
             current_price (float): The current price of the asset.
@@ -36,12 +32,10 @@ class BasePositionSizer(ABC):
             strategy_signal_strength (Optional[float]): Confidence or strength of the signal.
             latest_bar (Optional[BarData]): Latest bar data for volatility calculation.
             atr_value (Optional[float]): Pre-calculated ATR value.
-
         Returns:
             Optional[float]: The quantity of the asset to trade. None if cannot size or no trade.
         """
         pass
-
 class FixedFractionalPositionSizer(BasePositionSizer):
     """
     Sizes positions based on a fixed fraction of the total portfolio equity.
@@ -53,7 +47,6 @@ class FixedFractionalPositionSizer(BasePositionSizer):
             raise ValueError("Fraction must be > 0 and <= 1.")
         self.fraction_to_risk = fraction # This is the fraction of *equity* to risk
         logger.info(f"FixedFractionalPositionSizer initialized with fraction: {self.fraction_to_risk}")
-
     def calculate_size(
         self,
         symbol: str,
@@ -70,7 +63,6 @@ class FixedFractionalPositionSizer(BasePositionSizer):
         if current_portfolio_value <= 0:
             logger.warning(f"Current portfolio value is non-positive ({current_portfolio_value}). Cannot calculate position size.")
             return None
-
         # This sizer determines how much capital to *allocate* to this trade based on fixed fraction of equity.
         # It does not inherently consider a stop-loss to determine "risk per trade".
         # A more common "fixed fractional" risks a fraction of equity *based on a stop-loss distance*.
@@ -86,16 +78,12 @@ class FixedFractionalPositionSizer(BasePositionSizer):
         if capital_to_allocate > available_capital :
             logger.warning(f"Calculated capital to allocate ({capital_to_allocate:.2f}) for {symbol} exceeds available cash ({available_capital:.2f}). Using available cash.")
             capital_to_allocate = available_capital
-
         if capital_to_allocate <= 0:
             logger.info(f"No capital to allocate for {symbol} based on fixed fraction or available cash.")
             return None
-
         position_size = capital_to_allocate / current_price
         logger.info(f"FixedFractional Sizing for {symbol}: Allocating ${capital_to_allocate:.2f} (Equity: ${current_portfolio_value:.2f}, Fraction: {self.fraction_to_risk}). Position Size: {position_size:.6f} units at ${current_price:.2f}.")
         return position_size
-
-
 class ATRBasedPositionSizer(BasePositionSizer):
     """
     Sizes positions based on Average True Range (ATR) to normalize risk per trade.
@@ -107,8 +95,6 @@ class ATRBasedPositionSizer(BasePositionSizer):
         self.risk_per_trade_fraction = risk_per_trade_fraction # e.g., 0.01 for 1% of equity
         self.atr_multiple_for_stop = atr_multiple_for_stop # e.g., stop loss is 2 * ATR
         logger.info(f"ATRBasedPositionSizer initialized with risk_fraction: {self.risk_per_trade_fraction}, atr_multiple: {self.atr_multiple_for_stop}")
-
-
     def calculate_size(
         self,
         symbol: str,
@@ -119,7 +105,6 @@ class ATRBasedPositionSizer(BasePositionSizer):
         latest_bar: Optional[BarData] = None,
         atr_value: Optional[float] = None # Allow passing pre-calculated ATR
     ) -> Optional[float]:
-
         if atr_value is None:
             if latest_bar and 'atr_period' in self.params:
                 # Simplified: This would typically need a history of bars to calculate ATR.
@@ -141,7 +126,6 @@ class ATRBasedPositionSizer(BasePositionSizer):
         if current_portfolio_value <= 0:
             logger.warning(f"Current portfolio value is non-positive ({current_portfolio_value}). Cannot size position.")
             return None
-
         # Amount of capital to risk on this trade
         capital_at_risk = current_portfolio_value * self.risk_per_trade_fraction
         
@@ -150,18 +134,14 @@ class ATRBasedPositionSizer(BasePositionSizer):
         if stop_distance_per_unit == 0:
             logger.warning(f"Stop distance per unit is zero for {symbol} (ATR: {atr_value}, Multiple: {self.atr_multiple_for_stop}). Cannot size position.")
             return None
-
         # Number of units (position size)
         position_size = capital_at_risk / stop_distance_per_unit
-
         # Cost of this position
         position_cost = position_size * current_price
-
         if position_cost > available_capital:
             logger.warning(f"Calculated position cost (${position_cost:.2f}) for {symbol} exceeds available cash (${available_capital:.2f}). Reducing size.")
             position_size = available_capital / current_price # Adjust size to available cash
             if position_size == 0: return None
-
         logger.info(f"ATRBased Sizing for {symbol}: Risking ${capital_at_risk:.2f} (Equity: ${current_portfolio_value:.2f}). "
                     f"ATR: {atr_value:.4f}, StopDist: ${stop_distance_per_unit:.2f}. "
                     f"Size: {position_size:.6f} units at ${current_price:.2f}.")

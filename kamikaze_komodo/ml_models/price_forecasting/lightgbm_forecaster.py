@@ -4,13 +4,10 @@ import pandas as pd
 import numpy as np
 import joblib # For saving/loading model
 from typing import Optional, Dict, Any, List, Union
-
 from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings as app_settings # Use app_settings to avoid conflict
-
 logger = get_logger(__name__)
-
 class LightGBMForecaster(BasePriceForecaster):
     """
     LightGBM-based price forecaster.
@@ -40,7 +37,6 @@ class LightGBMForecaster(BasePriceForecaster):
                     config_lgbm_params[param_name] = value
         
         self.lgbm_params = {**self.default_lgbm_params, **config_lgbm_params}
-
         # If model_path was passed to super() and model loaded, self.model is set.
         # If model_path is in params (e.g. from config) but not passed directly to init, load it.
         if not self.model and self.model_path: # self.model_path is set by super if path given
@@ -50,8 +46,6 @@ class LightGBMForecaster(BasePriceForecaster):
             # This logic is typically handled by the training/inference pipeline that instantiates this.
             # For direct use, ensure model_path is passed or params correctly configure it.
             pass
-
-
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Creates a standard set of known features from the input data.
@@ -60,13 +54,10 @@ class LightGBMForecaster(BasePriceForecaster):
         if data.empty:
             logger.warning("Data for feature creation is empty.")
             return pd.DataFrame()
-
         df = data.copy() 
-
         if 'close' not in df.columns:
             logger.error("'close' column not found in data for feature creation.")
             return df 
-
         for lag in [1, 3, 5, 10]:
             df[f'log_return_lag_{lag}'] = np.log(df['close'] / df['close'].shift(lag))
             df[f'close_change_lag_{lag}'] = df['close'].pct_change(lag)
@@ -77,7 +68,6 @@ class LightGBMForecaster(BasePriceForecaster):
         else:
             df['volatility_5'] = np.nan
             df['volatility_10'] = np.nan
-
         if all(col in df.columns for col in ['high', 'low', 'close']):
             try:
                 import pandas_ta as ta
@@ -89,15 +79,11 @@ class LightGBMForecaster(BasePriceForecaster):
                 logger.warning(f"Error during pandas_ta feature creation: {e_ta}. TA features might be missing or incomplete.")
         else:
             logger.warning("Missing 'high', 'low', or 'close' columns. Skipping TA features.")
-
         df = df.replace([np.inf, -np.inf], np.nan)
         return df # Return DataFrame with ALL generated features, NaNs from shifts/calcs are expected here
-
-
     def train(self, historical_data: pd.DataFrame, target_column: str = 'close_change_lag_1_future', feature_columns_to_use: Optional[List[str]] = None):
         logger.info(f"Starting LightGBM training for target '{target_column}'. Data shape: {historical_data.shape}")
         df = historical_data.copy()
-
         if target_column == 'close_change_lag_1_future':
             df['target'] = (df['close'].shift(-1) / df['close']) - 1
         elif target_column.startswith('log_return_lag_') and target_column.endswith('_future'):
@@ -112,10 +98,8 @@ class LightGBMForecaster(BasePriceForecaster):
                 logger.error(f"Target column '{target_column}' not in data or not a recognized dynamic target format.")
                 return
             df['target'] = df[target_column]
-
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(subset=['target'], inplace=True) 
-
         df_with_all_features = self.create_features(df) 
         
         X_final_features = pd.DataFrame()
@@ -146,11 +130,9 @@ class LightGBMForecaster(BasePriceForecaster):
         X_final_features.dropna(inplace=True) 
         y_train = df.loc[X_final_features.index, 'target'] 
         X_train = X_final_features
-
         if X_train.empty or y_train.empty:
             logger.error("Feature matrix X_train or target vector y_train is empty after processing. Training cannot proceed.")
             return
-
         self.model = lgb.LGBMRegressor(**self.lgbm_params)
         logger.info(f"Training LightGBM model with {len(X_train)} samples. Features: {list(X_train.columns)}")
         try:
@@ -160,14 +142,12 @@ class LightGBMForecaster(BasePriceForecaster):
         except Exception as e:
             logger.error(f"Error during LightGBM model training: {e}", exc_info=True)
             self.model = None
-
     def predict(self, new_data: pd.DataFrame, feature_columns_to_use: Optional[list] = None) -> Union[pd.Series, float, None]:
         if self.model is None:
             logger.error("Model not loaded or trained. Cannot make predictions.")
             return None
         
         df_with_all_features = self.create_features(new_data)
-
         cols_for_prediction = None
         # Priority: 1. Explicitly passed `feature_columns_to_use`, 2. `self.trained_feature_columns_`
         if feature_columns_to_use:
@@ -184,7 +164,6 @@ class LightGBMForecaster(BasePriceForecaster):
             return None
         
         X_new = df_with_all_features[cols_for_prediction].copy()
-
         if X_new.empty:
             logger.warning("Feature matrix X_new is empty after selection. Cannot predict.")
             return None
@@ -197,7 +176,6 @@ class LightGBMForecaster(BasePriceForecaster):
             # Depending on LightGBM's setup and data, it might predict 0 or error.
             # Option: return None or fill specific ways if this is an issue.
             # For now, let LightGBM try.
-
         try:
             predictions = self.model.predict(X_new)
             logger.debug(f"Made {len(predictions)} predictions. Latest prediction input shape: {X_new.shape}. Prediction output: {predictions[-1] if len(predictions)>0 else 'N/A'}")
@@ -207,7 +185,6 @@ class LightGBMForecaster(BasePriceForecaster):
         except Exception as e:
             logger.error(f"Error during LightGBM prediction: {e}", exc_info=True)
             return None
-
     def save_model(self, path: Optional[str] = None):
         _path = path or self.model_path
         if self.model is None:
@@ -216,7 +193,6 @@ class LightGBMForecaster(BasePriceForecaster):
         if not _path:
             logger.error("No path specified for saving the model.")
             return
-
         try:
             model_and_features = {
                 'model': self.model,
@@ -226,7 +202,6 @@ class LightGBMForecaster(BasePriceForecaster):
             logger.info(f"LightGBM model and feature columns saved to {_path}")
         except Exception as e:
             logger.error(f"Error saving LightGBM model to {_path}: {e}", exc_info=True)
-
     def load_model(self, path: Optional[str] = None):
         _path = path or self.model_path
         if not _path:

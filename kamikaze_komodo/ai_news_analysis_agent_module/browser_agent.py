@@ -62,7 +62,7 @@ class BrowserAgent:
         else:
             logger.error(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
             raise ValueError(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
-        
+
         if self.llm is None:
             raise ValueError("BrowserAgent LLM initialization failed.")
 

@@ -1,15 +1,12 @@
 # kamikaze_komodo/data_handling/database_manager.py
 # Updated to include store/retrieve for NewsArticle
-
 import sqlite3
 from typing import List, Optional, Dict, Any # Added Dict, Any
 from kamikaze_komodo.core.models import BarData, NewsArticle # Added NewsArticle
 from kamikaze_komodo.app_logger import get_logger
 from datetime import datetime, timezone, UTC 
 import json # For storing dicts/lists like related_symbols or key_themes
-
 logger = get_logger(__name__)
-
 class DatabaseManager:
     """
     Manages local storage of data (initially SQLite).
@@ -21,7 +18,6 @@ class DatabaseManager:
         self.conn: Optional[sqlite3.Connection] = None
         self._connect()
         self._create_tables()
-
     def _connect(self):
         try:
             self.conn = sqlite3.connect(self.db_name, detect_types=sqlite3.PARSE_COLNAMES)
@@ -30,12 +26,10 @@ class DatabaseManager:
         except sqlite3.Error as e:
             logger.error(f"Error connecting to database {self.db_name}: {e}")
             self.conn = None
-
     def _create_tables(self):
         if not self.conn:
             logger.error("Cannot create tables, no database connection.")
             return
-
         try:
             cursor = self.conn.cursor()
             # BarData Table
@@ -86,7 +80,6 @@ class DatabaseManager:
             logger.info("Tables checked/created successfully (timestamps as TEXT, complex fields as JSON TEXT).")
         except sqlite3.Error as e:
             logger.error(f"Error creating tables: {e}")
-
     def _to_iso_format(self, dt: Optional[datetime]) -> Optional[str]:
         if dt is None: return None
         if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
@@ -94,7 +87,6 @@ class DatabaseManager:
         else:
             dt = dt.astimezone(UTC)
         return dt.isoformat()
-
     def _from_iso_format(self, iso_str: Optional[str]) -> Optional[datetime]:
         if iso_str is None: return None
         try:
@@ -105,7 +97,6 @@ class DatabaseManager:
         except ValueError:
             logger.warning(f"Could not parse ISO timestamp string: {iso_str}")
             return None
-
     def store_bar_data(self, bar_data_list: List[BarData]):
         if not self.conn: logger.error("No DB connection for bar data."); return False
         if not bar_data_list: logger.info("No bar data to store."); return True
@@ -128,18 +119,15 @@ class DatabaseManager:
             return True
         except Exception as e:
             logger.error(f"Error storing bar data: {e}", exc_info=True); return False
-
     def retrieve_bar_data(self, symbol: str, timeframe: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[BarData]:
         if not self.conn: logger.error("No DB connection for bar data."); return []
         try:
             cursor = self.conn.cursor()
             query = "SELECT timestamp, open, high, low, close, volume, symbol, timeframe, atr, sentiment_score FROM bar_data WHERE symbol = ? AND timeframe = ?"
             params = [symbol, timeframe]
-
             if start_date: query += " AND timestamp >= ?"; params.append(self._to_iso_format(start_date))
             if end_date: query += " AND timestamp <= ?"; params.append(self._to_iso_format(end_date))
             query += " ORDER BY timestamp ASC"
-
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             bar_data_list = []
@@ -155,7 +143,6 @@ class DatabaseManager:
             return bar_data_list
         except Exception as e:
             logger.error(f"Error retrieving bar data for {symbol} ({timeframe}): {e}", exc_info=True); return []
-
     def store_news_articles(self, articles: List[NewsArticle]):
         if not self.conn: logger.error("No DB connection for news articles."); return False
         if not articles: logger.info("No news articles to store."); return True
@@ -186,14 +173,12 @@ class DatabaseManager:
             return True
         except Exception as e:
             logger.error(f"Error storing news articles: {e}", exc_info=True); return False
-
     def retrieve_news_articles(self, symbol: Optional[str] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, source: Optional[str] = None, limit: int = 100) -> List[NewsArticle]:
         if not self.conn: logger.error("No DB connection for news articles."); return []
         try:
             cursor = self.conn.cursor()
             query = "SELECT * FROM news_articles WHERE 1=1"
             params = []
-
             if symbol: # Search in related_symbols (requires LIKE or a better FTS setup)
                 query += " AND related_symbols LIKE ?"
                 params.append(f"%\"{symbol}\"%") # Simple JSON array search, not very efficient
@@ -209,7 +194,6 @@ class DatabaseManager:
             
             query += " ORDER BY publication_date DESC, retrieval_date DESC LIMIT ?"
             params.append(limit)
-
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             articles_list = []
@@ -229,7 +213,6 @@ class DatabaseManager:
             return articles_list
         except Exception as e:
             logger.error(f"Error retrieving news articles: {e}", exc_info=True); return []
-
     def close(self):
         if self.conn: self.conn.close(); logger.info("Database connection closed."); self.conn = None
     def __del__(self): self.close()

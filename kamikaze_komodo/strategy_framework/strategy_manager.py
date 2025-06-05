@@ -4,9 +4,7 @@ from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
 from kamikaze_komodo.core.models import BarData
 from kamikaze_komodo.core.enums import SignalType
 from kamikaze_komodo.app_logger import get_logger
-
 logger = get_logger(__name__)
-
 class StrategyManager:
     """
     Manages the loading, initialization, and execution of trading strategies.
@@ -14,7 +12,6 @@ class StrategyManager:
     def __init__(self):
         self.strategies: List[BaseStrategy] = []
         logger.info("StrategyManager initialized.")
-
     def add_strategy(self, strategy: BaseStrategy):
         """Adds a strategy instance to the manager."""
         if not isinstance(strategy, BaseStrategy):
@@ -23,7 +20,6 @@ class StrategyManager:
         
         self.strategies.append(strategy)
         logger.info(f"Strategy '{strategy.name}' for {strategy.symbol} ({strategy.timeframe}) added to StrategyManager.")
-
     def remove_strategy(self, strategy_name: str, symbol: str, timeframe: str):
         """Removes a strategy by its name, symbol, and timeframe."""
         initial_count = len(self.strategies)
@@ -35,8 +31,6 @@ class StrategyManager:
             logger.info(f"Strategy '{strategy_name}' for {symbol} ({timeframe}) removed.")
         else:
             logger.warning(f"Strategy '{strategy_name}' for {symbol} ({timeframe}) not found for removal.")
-
-
     def load_strategies_from_config(self, config: Dict[str, Any]):
         """
         Loads strategies based on a configuration dictionary.
@@ -53,12 +47,10 @@ class StrategyManager:
         #         self.add_strategy(strategy_class(symbol, timeframe, params))
         logger.warning("load_strategies_from_config is a placeholder and not fully implemented.")
         pass
-
     def on_bar_data_all(self, bar_data: BarData) -> Dict[str, SignalType]:
         """
         Distributes new bar data to all relevant strategies and collects signals.
         A strategy is relevant if the bar_data.symbol and bar_data.timeframe match.
-
         Returns:
             Dict[str, SignalType]: A dictionary where keys are strategy identifiers
                                    (e.g., "EWMACStrategy_BTC/USD_1h") and values are signals.
@@ -72,15 +64,12 @@ class StrategyManager:
                     signals_from_strategies[strategy_id] = signal
                     logger.debug(f"Signal from {strategy_id}: {signal.name}")
         return signals_from_strategies
-
     def get_all_strategies(self) -> List[BaseStrategy]:
         return self.strategies
-
 # Example Usage (Conceptual)
 if __name__ == '__main__':
     from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
     from kamikaze_komodo.config.settings import settings # Assuming settings are loaded
-
     if settings:
         manager = StrategyManager()
         
@@ -91,7 +80,6 @@ if __name__ == '__main__':
         }
         ewmac_btc_1h = EWMACStrategy(symbol="BTC/USD", timeframe="1h", params=ewmac_params)
         manager.add_strategy(ewmac_btc_1h)
-
         # Simulate receiving bar data
         # In a real system, this BarData would come from DataFetcher
         from datetime import datetime, timezone
@@ -100,7 +88,6 @@ if __name__ == '__main__':
             open=40000, high=40500, low=39800, close=40200, volume=100,
             symbol="BTC/USD", timeframe="1h"
         )
-
         # To actually get a signal, the strategy needs historical data first.
         # This is a simplified call. `ewmac_btc_1h.update_data_history(bar)` would need to be called many times first.
         # For a single bar without history, it will likely return HOLD or an error if not enough data.

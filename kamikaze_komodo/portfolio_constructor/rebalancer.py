@@ -3,9 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from kamikaze_komodo.core.models import PortfolioSnapshot # Or other relevant models
 from kamikaze_komodo.app_logger import get_logger
-
 logger = get_logger(__name__)
-
 class BaseRebalancer(ABC):
     """
     Abstract base class for portfolio rebalancing logic.
@@ -13,7 +11,6 @@ class BaseRebalancer(ABC):
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         self.params = params if params is not None else {}
         logger.info(f"{self.__class__.__name__} initialized with params: {self.params}")
-
     @abstractmethod
     def needs_rebalancing(
         self,
@@ -22,16 +19,13 @@ class BaseRebalancer(ABC):
     ) -> bool:
         """
         Determines if the portfolio needs rebalancing based on current state and targets.
-
         Args:
             current_portfolio (PortfolioSnapshot): The current state of the portfolio.
             target_allocations (Dict[str, float]): The desired target allocations (e.g., asset: percentage).
-
         Returns:
             bool: True if rebalancing is needed, False otherwise.
         """
         pass
-
     @abstractmethod
     def generate_rebalancing_orders(
         self,
@@ -40,17 +34,14 @@ class BaseRebalancer(ABC):
     ) -> List[Dict[str, Any]]: # List of order parameters
         """
         Generates orders needed to rebalance the portfolio to target allocations.
-
         Args:
             current_portfolio (PortfolioSnapshot): The current state of the portfolio.
             target_allocations (Dict[str, float]): The desired target allocations.
-
         Returns:
             List[Dict[str, Any]]: A list of order parameters (e.g., for exchange_api.create_order).
                                   Example: [{'symbol': 'BTC/USD', 'type': OrderType.MARKET, 'side': OrderSide.SELL, 'amount': 0.1}, ...]
         """
         pass
-
 class BasicRebalancer(BaseRebalancer):
     """
     A basic rebalancer that might trigger rebalancing if deviations exceed a threshold.
@@ -60,7 +51,6 @@ class BasicRebalancer(BaseRebalancer):
         super().__init__(params)
         self.deviation_threshold = deviation_threshold
         logger.info(f"BasicRebalancer initialized with deviation threshold: {self.deviation_threshold}")
-
     def needs_rebalancing(
         self,
         current_portfolio: PortfolioSnapshot,
@@ -73,8 +63,6 @@ class BasicRebalancer(BaseRebalancer):
             logger.debug("Portfolio total value is zero or negative, cannot calculate current weights.")
             # Rebalancing might be needed if there are target allocations and capital
             return any(target_allocations.get(asset,0) > 0 for asset in target_allocations)
-
-
         for asset, target_weight in target_allocations.items():
             current_asset_value = 0.0
             # This part needs current prices to evaluate asset value if not directly in portfolio snapshot
@@ -85,7 +73,6 @@ class BasicRebalancer(BaseRebalancer):
             # current_price = get_current_price(asset) # This function would be needed
             # current_asset_value = current_asset_quantity * current_price
             # current_weight = current_asset_value / current_portfolio.total_value_usd
-
             # Simplified: This check needs proper value calculation of current positions.
             # For now, let's assume this logic will be more fleshed out when multi-asset trading is live.
             # If we simply check if target exists and we don't have it, or vice versa:
@@ -99,7 +86,6 @@ class BasicRebalancer(BaseRebalancer):
         
         logger.debug("BasicRebalancer: No immediate rebalancing need detected based on simple checks.")
         return False # Placeholder
-
     def generate_rebalancing_orders(
         self,
         current_portfolio: PortfolioSnapshot,

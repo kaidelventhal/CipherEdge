@@ -94,7 +94,7 @@ class SentimentAnalyzer:
         if not text or not text.strip():
             logger.warning("No text provided for sentiment analysis.")
             return None
-        
+
         if self.llm is None:
             logger.error("LLM not initialized. Cannot analyze sentiment.")
             return None
@@ -103,13 +103,13 @@ class SentimentAnalyzer:
         try:
             # Max input tokens for gemini-2.5-flash-preview is high, but let's be reasonable.
             # Prompt itself consumes tokens. Max 30k chars ~ 7.5k tokens for text.
-            max_chars = 30000 
+            max_chars = 30000
             if len(text) > max_chars:
                 logger.warning(f"Text too long ({len(text)} chars), truncating to {max_chars} for sentiment analysis.")
                 text = text[:max_chars]
 
             response_dict = await self.chain.ainvoke({"text_to_analyze": text, "asset_context": asset_context})
-            
+
             # The output_parser should already return a SentimentAnalysisOutput object if successful
             # If it's a dict, it means JsonOutputParser might not have directly instantiated the Pydantic model
             # or the LLM didn't return perfect JSON matching the Pydantic model structure.
@@ -119,7 +119,7 @@ class SentimentAnalyzer:
                     validated_output = SentimentAnalysisOutput(**response_dict)
                     logger.info(f"Structured sentiment for '{asset_context}': Label: {validated_output.sentiment_label}, Score: {validated_output.sentiment_score:.2f}, Confidence: {validated_output.confidence}")
                     return validated_output
-                except Exception as p_exc: 
+                except Exception as p_exc:
                     logger.error(f"Pydantic validation failed for LLM JSON output: {response_dict}. Error: {p_exc}", exc_info=True)
                     return None
             elif isinstance(response_dict, SentimentAnalysisOutput): # Already a Pydantic object
@@ -166,7 +166,7 @@ class SentimentAnalyzer:
             article.key_themes = sentiment_result.key_themes
             article.sentiment_confidence = sentiment_result.confidence
             # article.raw_llm_response can store the full dict if needed for debugging
-            # article.raw_llm_response = sentiment_result.model_dump() 
+            # article.raw_llm_response = sentiment_result.model_dump()
         return article
 
 # Example Usage

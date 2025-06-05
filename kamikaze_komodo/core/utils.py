@@ -1,8 +1,5 @@
-# kamikaze_komodo/core/utils.py
 from datetime import datetime, timezone
-
 from kamikaze_komodo.core.models import BarData
-
 def format_timestamp(ts: datetime, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     """
     Formats a datetime object into a string.
@@ -11,13 +8,11 @@ def format_timestamp(ts: datetime, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts.strftime(fmt)
-
 def current_timestamp_ms() -> int:
     """
     Returns the current UTC timestamp in milliseconds.
     """
     return int(datetime.now(timezone.utc).timestamp() * 1000)
-
 def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> BarData:
     """
     Converts a CCXT OHLCV list [timestamp_ms, open, high, low, close, volume]
@@ -27,7 +22,6 @@ def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> BarData:
     
     if len(ohlcv) != 6:
         raise ValueError("OHLCV list must contain 6 elements: timestamp, open, high, low, close, volume")
-
     dt_object = datetime.fromtimestamp(ohlcv[0] / 1000, tz=timezone.utc)
     return BarData(
         timestamp=dt_object,
@@ -39,7 +33,6 @@ def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> BarData:
         symbol=symbol,
         timeframe=timeframe
     )
-
 # Add other utility functions as needed, e.g.,
 # - Mathematical helpers not in TA-Lib
 # - Data validation functions
