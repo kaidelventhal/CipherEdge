@@ -1,4 +1,4 @@
-kamikaze_komodo/app_logger.py:
+kamikaze_komodo\app_logger.py:
 <code>
 # kamikaze_komodo/app_logger.py
 import logging
@@ -41,7 +41,7 @@ def get_logger(module_name: str) -> logging.Logger:
     return logging.getLogger(f"KamikazeKomodo.{module_name}")
 </code>
 
-kamikaze_komodo/main.py:
+kamikaze_komodo\main.py:
 <code>
 # kamikaze_komodo/main.py
 import asyncio
@@ -53,28 +53,28 @@ from typing import List, Optional, Dict, Any
 from kamikaze_komodo.app_logger import get_logger, logger as root_logger
 from kamikaze_komodo.config.settings import settings
 
-# Phase 1 & 2 imports (already present)
+# Phase 1 & 2 imports
 from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
 from kamikaze_komodo.data_handling.database_manager import DatabaseManager
 from kamikaze_komodo.exchange_interaction.exchange_api import ExchangeAPI
-from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager
+# from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager # Not directly used in demos
 from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
 from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
 from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
-from kamikaze_komodo.core.models import BarData, NewsArticle # Added NewsArticle
-from kamikaze_komodo.core.enums import SignalType # For strategy checking
+from kamikaze_komodo.core.models import BarData, NewsArticle
+# from kamikaze_komodo.core.enums import SignalType # For strategy checking, not directly used here
 
 # Phase 3 imports
 from kamikaze_komodo.risk_control_module.position_sizer import FixedFractionalPositionSizer, ATRBasedPositionSizer
 from kamikaze_komodo.risk_control_module.stop_manager import PercentageStopManager, ATRStopManager
+
 # Portfolio constructor components are more for multi-asset; for single-asset backtest, they are less directly demonstrated here.
 
 # Phase 4 imports
 from kamikaze_komodo.ai_news_analysis_agent_module.news_scraper import NewsScraper
 from kamikaze_komodo.ai_news_analysis_agent_module.sentiment_analyzer import SentimentAnalyzer
-from kamikaze_komodo.ai_news_analysis_agent_module.browser_agent import BrowserAgent # Optional advanced feature
-from kamikaze_komodo.ai_news_analysis_agent_module.notification_listener import NotificationListener, dummy_notification_callback
-
+# from kamikaze_komodo.ai_news_analysis_agent_module.browser_agent import BrowserAgent # Optional advanced feature
+# from kamikaze_komodo.ai_news_analysis_agent_module.notification_listener import NotificationListener, dummy_notification_callback # Placeholder
 
 logger = get_logger(__name__)
 
@@ -88,7 +88,7 @@ async def run_phase1_demonstration():
 
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
-    start_period = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days else 30)
+    start_period = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days if settings.historical_data_days > 0 else 30)
     end_period = datetime.now(timezone.utc)
 
     historical_data = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_period, end_period)
@@ -102,8 +102,10 @@ async def run_phase1_demonstration():
 
     balance = await exchange_api.fetch_balance()
     if balance:
-        base_currency = symbol.split('/')[0] if '/' in symbol else symbol.split(':')[0] if ':' in symbol else "N/A"
-        quote_currency = symbol.split('/')[1] if '/' in symbol else "USD" # Assuming USD or similar
+        # Updated currency extraction logic
+        base_currency = symbol.split('/')[0].split(':')[0] if '/' in symbol or ':' in symbol else "N/A"
+        quote_currency = symbol.split('/')[1] if '/' in symbol else (symbol.split(':')[1] if ':' in symbol else "USD")
+        
         logger.info(f"Fetched balance. Free {base_currency}: {balance.get(base_currency, {}).get('free', 'N/A')}, Free {quote_currency}: {balance.get(quote_currency, {}).get('free', 'N/A')}")
     else:
         logger.warning("Could not fetch account balance.")
@@ -113,50 +115,50 @@ async def run_phase1_demonstration():
     db_manager.close()
     root_logger.info("Phase 1 Demonstration completed.")
 
-
 async def run_phase2_demonstration():
     root_logger.info("Starting Kamikaze Komodo - Phase 2: Basic Strategy & Backtesting")
     if not settings: root_logger.critical("Settings failed to load."); return
 
     db_manager = DatabaseManager()
     data_fetcher = DataFetcher()
-
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
     hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 365
     start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    historical_bars: List[BarData] = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
-    required_bars_for_strategy = settings.ewmac_long_window + 5 # Example buffer
+    ewmac_params_for_min_bars = settings.get_strategy_params("EWMAC")
+    min_bars_needed = int(ewmac_params_for_min_bars.get('longwindow', settings.ewmac_long_window)) + 5 # Buffer
 
-    if not historical_bars or len(historical_bars) < required_bars_for_strategy:
-        logger.info(f"Insufficient data in DB for {symbol}. Fetching fresh for {hist_days} days...")
+    historical_bars: List[BarData] = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+    
+    if not historical_bars or len(historical_bars) < min_bars_needed:
+        logger.info(f"Insufficient data in DB for {symbol} ({len(historical_bars)}/{min_bars_needed}). Fetching fresh for {hist_days} days...")
         historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
         if historical_bars: db_manager.store_bar_data(historical_bars)
         else: logger.error(f"Failed to fetch sufficient data for {symbol}. Backtest cannot proceed."); await data_fetcher.close(); db_manager.close(); return
+    
+    await data_fetcher.close() # Close after fetching
+    db_manager.close() # Close after retrieving/storing
 
-    await data_fetcher.close()
-    db_manager.close()
-
-    if not historical_bars or len(historical_bars) < required_bars_for_strategy:
-        logger.error(f"Still not enough historical data for {symbol} ({len(historical_bars)} bars) after fetch attempt. Backtest aborted."); return
+    if not historical_bars or len(historical_bars) < min_bars_needed:
+        logger.error(f"Still not enough historical data for {symbol} ({len(historical_bars)} bars vs {min_bars_needed} needed) after fetch attempt. Backtest aborted."); return
+    
     logger.info(f"Using {len(historical_bars)} bars for backtesting {symbol}.")
-
     data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
     data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
     data_df.set_index('timestamp', inplace=True)
 
-    if data_df.empty or len(data_df) < max(settings.ewmac_short_window, settings.ewmac_long_window):
+    if data_df.empty or len(data_df) < min_bars_needed:
         logger.error(f"DataFrame conversion error or insufficient points for EWMAC ({len(data_df)})."); return
 
-    ewmac_params = settings.get_strategy_params("EWMAC") # Gets params from [EWMAC_Strategy]
+    ewmac_params = settings.get_strategy_params("EWMAC") # Gets params from [EWMAC_Strategy] in config
     ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
-
+    
     initial_capital = 10000.00
     commission_bps = settings.commission_bps
     backtest_engine = BacktestingEngine(data_feed_df=data_df, strategy=ewmac_strategy, initial_capital=initial_capital, commission_bps=commission_bps)
-
+    
     logger.info(f"Running basic backtest for EWMAC on {symbol}...")
     trades_log, final_portfolio = backtest_engine.run()
 
@@ -168,6 +170,7 @@ async def run_phase2_demonstration():
     else:
         logger.info(f"Backtest (Phase 2) completed. No trades executed. Final portfolio value: ${final_portfolio['final_portfolio_value']:.2f}")
     root_logger.info("Phase 2 Demonstration completed.")
+
 
 async def run_phase3_demonstration():
     root_logger.info("Starting Kamikaze Komodo - Phase 3: Risk Management Integration")
@@ -181,33 +184,35 @@ async def run_phase3_demonstration():
     start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
-    # Strategy itself will define ATR period in its params
-    ewmac_temp_params = settings.get_strategy_params("EWMAC")
-    atr_period_for_min_bars = int(ewmac_temp_params.get("atr_period", 14))
-    min_bars_needed = (settings.ewmac_long_window + atr_period_for_min_bars + 5) # For EMA + ATR + buffer
+    ewmac_params_for_min_bars_phase3 = settings.get_strategy_params("EWMAC")
+    # For ATR-based risk, strategy needs enough data to calculate ATR.
+    # ATR period is now part of strategy params from get_strategy_params.
+    atr_period_from_params = int(ewmac_params_for_min_bars_phase3.get("atr_period", settings.ewmac_atr_period))
+    long_window_from_params = int(ewmac_params_for_min_bars_phase3.get("longwindow", settings.ewmac_long_window))
+    min_bars_needed = max(long_window_from_params, atr_period_from_params) + 5 # Buffer
 
+    historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
     if not historical_bars or len(historical_bars) < min_bars_needed:
         logger.info(f"Fetching fresh data for Phase 3 backtest (need ~{min_bars_needed} bars)...")
         historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
         if historical_bars: db_manager.store_bar_data(historical_bars)
         else: logger.error(f"Failed to fetch data for {symbol}. Aborting."); await data_fetcher.close(); db_manager.close(); return
+    
+    await data_fetcher.close()
+    db_manager.close()
 
-    await data_fetcher.close(); db_manager.close()
     if not historical_bars or len(historical_bars) < min_bars_needed:
-        logger.error(f"Not enough data ({len(historical_bars)} bars) for Phase 3 backtest. Aborting."); return
-
+        logger.error(f"Not enough data ({len(historical_bars)} bars vs {min_bars_needed} needed) for Phase 3 backtest. Aborting."); return
+    
     data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
     data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
     data_df.set_index('timestamp', inplace=True)
-    # Note: EWMACStrategy will calculate ATR internally.
-
+    
+    # Strategy will calculate ATR internally if 'atr_period' is in its params
     ewmac_params = settings.get_strategy_params("EWMAC")
-    # Ensure ATR period is in params for the strategy to use it
-    if 'atr_period' not in ewmac_params: ewmac_params['atr_period'] = 14
     ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
 
-    # Position Sizer (from config)
+    position_sizer: Optional[Any] = None
     if settings.position_sizer_type.lower() == 'atrbased':
         position_sizer = ATRBasedPositionSizer(
             risk_per_trade_fraction=settings.atr_based_risk_per_trade_fraction,
@@ -217,7 +222,7 @@ async def run_phase3_demonstration():
         position_sizer = FixedFractionalPositionSizer(fraction=settings.fixed_fractional_allocation_fraction)
     logger.info(f"Using Position Sizer: {position_sizer.__class__.__name__}")
 
-    # Stop Manager (from config)
+    stop_manager: Optional[Any] = None
     if settings.stop_manager_type.lower() == 'atrbased':
         stop_manager = ATRStopManager(atr_multiple=settings.atr_stop_atr_multiple)
     else: # Default to PercentageBased
@@ -237,7 +242,6 @@ async def run_phase3_demonstration():
         position_sizer=position_sizer,
         stop_manager=stop_manager
     )
-
     logger.info(f"Running Phase 3 backtest (EWMAC with Risk Management) on {symbol}...")
     trades_log, final_portfolio = backtest_engine.run()
 
@@ -255,37 +259,80 @@ async def run_phase4_demonstration():
     root_logger.info("Starting Kamikaze Komodo - Phase 4: AI News & Sentiment Integration")
     if not settings: root_logger.critical("Settings failed to load."); return
 
-    # ... (News Scraping, BrowserAgent, NotificationListener sections remain the same) ...
-    # Ensure those sections are complete as in the previous response if you copy this one.
+    # 1. News Scraping (Optional live scrape for demo, or assume pre-populated DB)
+    if settings.news_scraper_enable:
+        logger.info("--- Running News Scraper (Phase 4 Demo) ---")
+        try:
+            news_scraper = NewsScraper() # Configured from settings
+            # Scrape recent articles, e.g., last 48 hours for RSS, limit per source
+            scraped_articles = await news_scraper.scrape_all(limit_per_source=5, since_hours_rss=48)
+            if scraped_articles:
+                logger.info(f"Scraped {len(scraped_articles)} unique articles.")
+                
+                # 2. Sentiment Analysis (Optional live analysis for demo)
+                if settings.enable_sentiment_analysis and settings.sentiment_llm_provider == "VertexAI" and settings.vertex_ai_project_id:
+                    logger.info("--- Running Sentiment Analyzer on Scraped Articles (Phase 4 Demo) ---")
+                    try:
+                        sentiment_analyzer = SentimentAnalyzer() # Configured from settings
+                        analyzed_articles: List[NewsArticle] = []
+                        for article_to_analyze in scraped_articles[:5]: # Analyze first 5 for demo speed
+                            logger.info(f"Analyzing sentiment for: {article_to_analyze.title[:50]}...")
+                            updated_article = await sentiment_analyzer.get_sentiment_for_article(article_to_analyze)
+                            analyzed_articles.append(updated_article)
+                            if updated_article.sentiment_label:
+                                logger.info(f"  -> Sentiment: {updated_article.sentiment_label} ({updated_article.sentiment_score:.2f})")
+                        
+                        # Store analyzed articles (including sentiment) in DB
+                        if analyzed_articles:
+                            db_manager_news = DatabaseManager()
+                            db_manager_news.store_news_articles(analyzed_articles)
+                            logger.info(f"Stored {len(analyzed_articles)} analyzed articles in the database.")
+                            db_manager_news.close()
+                    except Exception as e_sa_live:
+                        logger.error(f"Error during live sentiment analysis demo: {e_sa_live}", exc_info=True)
+                elif not settings.enable_sentiment_analysis:
+                    logger.info("Live sentiment analysis is disabled in settings.")
+                elif settings.sentiment_llm_provider != "VertexAI" or not settings.vertex_ai_project_id:
+                     logger.warning("Live sentiment analysis configured for non-VertexAI or VertexAI not fully configured (Project ID missing). Skipping live analysis demo.")
+            else:
+                logger.info("No articles scraped in this run.")
+        except Exception as e_scrape_live:
+            logger.error(f"Error during live news scraping demo: {e_scrape_live}", exc_info=True)
+    else:
+        logger.info("News Scraper is disabled in settings. Skipping live scraping/analysis for Phase 4 demo.")
 
-    # 4. Backtesting with Simulated Sentiment Data
-    logger.info("Proceeding to backtest with sentiment integration...")
-    db_manager = DatabaseManager()
-    data_fetcher = DataFetcher()
+
+    # 3. Backtesting with Simulated Sentiment Data (Primary focus of Phase 4 completion)
+    logger.info("--- Proceeding to backtest with sentiment integration using simulated data ---")
+    db_manager_bt = DatabaseManager()
+    data_fetcher_bt = DataFetcher()
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
-    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 90 
-    start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
-    end_date = datetime.now(timezone.utc)
+    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 90 # Shorter for faster demo if needed
+    start_date_bt = datetime.now(timezone.utc) - timedelta(days=hist_days)
+    end_date_bt = datetime.now(timezone.utc)
 
-    historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
-    ewmac_temp_params_sentiment = settings.get_strategy_params("EWMAC")
-    atr_period_for_min_bars_sentiment = int(ewmac_temp_params_sentiment.get("atr_period", 14))
-    min_bars_needed_sentiment = (settings.ewmac_long_window + atr_period_for_min_bars_sentiment + 5)
+    ewmac_params_phase4 = settings.get_strategy_params("EWMAC")
+    atr_period_phase4 = int(ewmac_params_phase4.get("atr_period", settings.ewmac_atr_period))
+    long_window_phase4 = int(ewmac_params_phase4.get("longwindow", settings.ewmac_long_window))
+    min_bars_needed_phase4 = max(long_window_phase4, atr_period_phase4) + 5
 
-    if not historical_bars or len(historical_bars) < min_bars_needed_sentiment:
-        logger.info(f"Fetching fresh data for Phase 4 backtest (need ~{min_bars_needed_sentiment} bars)...")
-        historical_bars = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
-        if historical_bars: db_manager.store_bar_data(historical_bars)
-        else: logger.error(f"Failed to fetch data for {symbol}. Aborting Phase 4 backtest."); await data_fetcher.close(); db_manager.close(); return
+    historical_bars_bt = db_manager_bt.retrieve_bar_data(symbol, timeframe, start_date_bt, end_date_bt)
+    if not historical_bars_bt or len(historical_bars_bt) < min_bars_needed_phase4:
+        logger.info(f"Fetching fresh data for Phase 4 backtest (need ~{min_bars_needed_phase4} bars)...")
+        historical_bars_bt = await data_fetcher_bt.fetch_historical_data_for_period(symbol, timeframe, start_date_bt, end_date_bt)
+        if historical_bars_bt: db_manager_bt.store_bar_data(historical_bars_bt)
+        else: logger.error(f"Failed to fetch data for {symbol}. Aborting Phase 4 backtest."); await data_fetcher_bt.close(); db_manager_bt.close(); return
+    
+    await data_fetcher_bt.close()
+    db_manager_bt.close()
 
-    await data_fetcher.close(); db_manager.close()
-    if not historical_bars or len(historical_bars) < min_bars_needed_sentiment:
-        logger.error(f"Not enough data ({len(historical_bars)} bars) for Phase 4 backtest. Aborting."); return
+    if not historical_bars_bt or len(historical_bars_bt) < min_bars_needed_phase4:
+        logger.error(f"Not enough data ({len(historical_bars_bt)} bars) for Phase 4 backtest. Aborting."); return
 
-    data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
-    data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
-    data_df.set_index('timestamp', inplace=True)
+    data_df_bt = pd.DataFrame([bar.model_dump() for bar in historical_bars_bt])
+    data_df_bt['timestamp'] = pd.to_datetime(data_df_bt['timestamp'])
+    data_df_bt.set_index('timestamp', inplace=True)
 
     # Load Simulated Sentiment Data
     sentiment_df: Optional[pd.DataFrame] = None
@@ -296,46 +343,32 @@ async def run_phase4_demonstration():
             try:
                 sentiment_df = pd.read_csv(sentiment_csv_path, parse_dates=['timestamp'], index_col='timestamp')
                 if sentiment_df.empty:
-                    logger.warning(f"Simulated sentiment data file is empty: {sentiment_csv_path}")
-                    sentiment_df = None
+                    logger.warning(f"Simulated sentiment data file is empty: {sentiment_csv_path}"); sentiment_df = None
                 else:
-                    if sentiment_df.index.tz is None:
-                        sentiment_df.index = sentiment_df.index.tz_localize('UTC')
-                    else:
-                        sentiment_df.index = sentiment_df.index.tz_convert('UTC')
-                    
+                    if sentiment_df.index.tz is None: sentiment_df.index = sentiment_df.index.tz_localize('UTC')
+                    else: sentiment_df.index = sentiment_df.index.tz_convert('UTC')
                     if 'sentiment_score' not in sentiment_df.columns:
-                        logger.error(f"'sentiment_score' column not found in {sentiment_csv_path}. Sentiment will not be used.")
-                        sentiment_df = None
+                        logger.error(f"'sentiment_score' column not found in {sentiment_csv_path}. Sentiment will not be used."); sentiment_df = None
                     else:
-                        logger.info(f"Successfully loaded simulated sentiment data from: {sentiment_csv_path} with {len(sentiment_df)} entries.")
-                        logger.info(f"First 5 sentiment scores:\n{sentiment_df['sentiment_score'].head().to_string()}")
-                        logger.info(f"Last 5 sentiment scores:\n{sentiment_df['sentiment_score'].tail().to_string()}")
-                        logger.info(f"Sentiment data timespan: {sentiment_df.index.min()} to {sentiment_df.index.max()}")
+                        logger.info(f"Successfully loaded {len(sentiment_df)} simulated sentiment entries from: {sentiment_csv_path}")
             except Exception as e_csv:
-                logger.error(f"Error loading simulated sentiment data from {sentiment_csv_path}: {e_csv}. Proceeding without sentiment.", exc_info=True)
-                sentiment_df = None
+                logger.error(f"Error loading simulated sentiment data from {sentiment_csv_path}: {e_csv}. Proceeding without sentiment.", exc_info=True); sentiment_df = None
         else:
             logger.warning(f"Simulated sentiment data file NOT FOUND at: {sentiment_csv_path}. Proceeding without external sentiment.")
     elif not settings.enable_sentiment_analysis:
         logger.info("Sentiment analysis is disabled in settings. Backtest will not use external sentiment data.")
-    else:
-        logger.info("No simulated sentiment data path provided in settings. Proceeding without external sentiment.")
+    else: # Path not provided
+        logger.info("No simulated sentiment data path provided. Proceeding without external sentiment.")
 
-    ewmac_params_sentiment = settings.get_strategy_params("EWMAC")
-    if 'sentiment_filter_long_threshold' not in ewmac_params_sentiment:
-        ewmac_params_sentiment['sentiment_filter_long_threshold'] = settings.sentiment_filter_threshold_long
-    if 'sentiment_filter_short_threshold' not in ewmac_params_sentiment:
-        ewmac_params_sentiment['sentiment_filter_short_threshold'] = settings.sentiment_filter_threshold_short
-    if 'atr_period' not in ewmac_params_sentiment: ewmac_params_sentiment['atr_period'] = 14
-
-    ewmac_strategy_sentiment = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params_sentiment)
-
+    ewmac_strategy_sentiment = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params_phase4)
+    
+    position_sizer_sent: Optional[Any] = None
     if settings.position_sizer_type.lower() == 'atrbased':
         position_sizer_sent = ATRBasedPositionSizer(settings.atr_based_risk_per_trade_fraction, settings.atr_based_atr_multiple_for_stop)
     else:
         position_sizer_sent = FixedFractionalPositionSizer(settings.fixed_fractional_allocation_fraction)
 
+    stop_manager_sent: Optional[Any] = None
     if settings.stop_manager_type.lower() == 'atrbased':
         stop_manager_sent = ATRStopManager(settings.atr_stop_atr_multiple)
     else:
@@ -343,16 +376,16 @@ async def run_phase4_demonstration():
 
     initial_capital = 10000.00
     commission_bps = settings.commission_bps
+    
     backtest_engine_sentiment = BacktestingEngine(
-        data_feed_df=data_df,
+        data_feed_df=data_df_bt,
         strategy=ewmac_strategy_sentiment,
         initial_capital=initial_capital,
         commission_bps=commission_bps,
         position_sizer=position_sizer_sent,
         stop_manager=stop_manager_sent,
-        sentiment_data_df=sentiment_df 
+        sentiment_data_df=sentiment_df # Pass loaded sentiment data
     )
-
     logger.info(f"Running Phase 4 backtest (EWMAC with Sentiment & Risk Mgmt) on {symbol}...")
     trades_log, final_portfolio = backtest_engine_sentiment.run()
 
@@ -375,20 +408,23 @@ async def main():
     # --- Select phases to run ---
     # await run_phase1_demonstration()
     # await run_phase2_demonstration()
-    await run_phase3_demonstration()
+    # await run_phase3_demonstration()
     await run_phase4_demonstration()
-    # For Phase 4, ensure Ollama is running if live sentiment analysis is part of it,
-    # and 'data/simulated_sentiment_data.csv' exists (relative to kamikaze_komodo/) for backtesting.
-    # Example simulated_sentiment_data.csv in kamikaze_komodo/data/:
-    # timestamp,sentiment_score
-    # 2023-01-01T00:00:00Z,0.5
-    # 2023-01-01T01:00:00Z,-0.2
-
+    
     root_logger.info("Kamikaze Komodo Program Finished.")
-
 
 if __name__ == "__main__":
     try:
+        # Ensure GOOGLE_APPLICATION_CREDENTIALS is set in your environment for Vertex AI
+        # e.g., export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json"
+        # Also, ensure playwright browsers are installed if using BrowserAgent:
+        # playwright install --with-deps chromium
+        if settings and settings.sentiment_llm_provider == "VertexAI" and not settings.vertex_ai_project_id:
+             root_logger.warning("Vertex AI is selected, but Project ID is not set in config.ini. AI features may fail.")
+             root_logger.warning("Please set your GCP Project ID in kamikaze_komodo/config/config.ini ([VertexAI] -> ProjectID)")
+             root_logger.warning("And ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set.")
+
+
         asyncio.run(main())
     except KeyboardInterrupt:
         root_logger.info("Kamikaze Komodo program terminated by user.")
@@ -396,152 +432,145 @@ if __name__ == "__main__":
         root_logger.critical(f"Critical error in main execution: {e}", exc_info=True)
 </code>
 
-kamikaze_komodo/__init__.py:
+kamikaze_komodo\__init__.py:
 <code>
 # kamikaze_komodo/__init__.py
 # This file makes the 'root' directory a Python package.
 </code>
 
-kamikaze_komodo/ai_news_analysis_agent_module/browser_agent.py:
+kamikaze_komodo\ai_news_analysis_agent_module\browser_agent.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/browser_agent.py
 import asyncio
 from typing import Optional, Any, Dict
-
-from browser_use import Agent as BrowserUseAgent # Renamed to avoid conflict
-from langchain_ollama import ChatOllama # Assuming this is the preferred LLM interface
-
 from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings # Import global settings
 
 logger = get_logger(__name__)
 
 class BrowserAgent:
     """
-    Uses browser-use with an LLM (e.g., Gemma 3 via Ollama) to perform targeted market research.
-    This is an adaptation of the user-provided testBrowserUse.py script.
+    Uses browser-use with a configured LLM (e.g., Vertex AI's Gemini)
+    to perform targeted market research.
     """
-    def __init__(self, llm_model_name: str = "gemma3:12b", ollama_base_url: Optional[str] = None, llm_context_window: int = 8192):
-        self.llm_model_name = llm_model_name
-        self.ollama_base_url = ollama_base_url
-        self.llm_context_window = llm_context_window # Default for many Gemma models
-        self.llm: Optional[ChatOllama] = None
-        
+    def __init__(self):
+        if not settings:
+            logger.critical("Settings not loaded. BrowserAgent cannot be initialized.")
+            raise ValueError("Settings not loaded.")
+
+        self.llm_provider = settings.browser_agent_llm_provider
+        self.llm: Optional[Any] = None # To be initialized
+        self.agent_is_ready = False
+
         try:
-            llm_params: Dict[str, Any] = {
-                "model": self.llm_model_name,
-                "num_ctx": self.llm_context_window, # Context window size for Ollama
-                "temperature": 0.1 # Low temperature for factual research
-            }
-            if self.ollama_base_url:
-                llm_params["base_url"] = self.ollama_base_url
-            
-            self.llm = ChatOllama(**llm_params)
-            logger.info(f"BrowserAgent initialized with LLM: {self.llm_model_name}, Context Window: {self.llm_context_window}")
+            self._initialize_llm()
+            # Dynamically import browser_use only if LLM init is successful
+            global BrowserUseAgent # Make it global for the method if loaded
+            from browser_use import Agent as BrowserUseAgent
+            self.agent_is_ready = True
+            logger.info("browser-use Agent component dynamically imported.")
+        except ImportError:
+            logger.error("browser-use library not found. Please install it: pip install browser-use")
+            logger.error("Also run: playwright install --with-deps chromium")
         except Exception as e:
-            logger.error(f"Error initializing Ollama LLM ({self.llm_model_name}) for BrowserAgent: {e}")
-            logger.error("Please ensure Ollama is running and the model is pulled.")
-            # self.llm will remain None, subsequent calls will fail gracefully.
-            # Consider raising an exception if LLM is critical for instantiation.
+            logger.error(f"BrowserAgent initialization failed: {e}")
+
+
+    def _initialize_llm(self):
+        logger.info(f"Initializing LLM for BrowserAgent with provider: {self.llm_provider}")
+        if self.llm_provider == "VertexAI":
+            if not settings.vertex_ai_project_id or not settings.vertex_ai_location:
+                logger.error("Vertex AI project ID or location is not configured. BrowserAgent LLM will not work.")
+                raise ValueError("Vertex AI project ID or location missing for BrowserAgent.")
+            try:
+                from langchain_google_vertexai import ChatVertexAI
+                self.llm = ChatVertexAI(
+                    project=settings.vertex_ai_project_id,
+                    location=settings.vertex_ai_location,
+                    model_name=settings.vertex_ai_browser_agent_model_name, # Use specific model for browser agent
+                    temperature=0.2, # Slightly higher temp for research/summarization
+                    # max_output_tokens=2048, # Optional
+                )
+                logger.info(f"BrowserAgent initialized with Vertex AI model: {settings.vertex_ai_browser_agent_model_name}")
+                logger.info("Ensure Google Cloud credentials (GOOGLE_APPLICATION_CREDENTIALS) are set for Vertex AI.")
+            except ImportError:
+                logger.error("langchain-google-vertexai not found. pip install langchain-google-vertexai")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to initialize Vertex AI LLM for BrowserAgent: {e}", exc_info=True)
+                raise
+
+        else:
+            logger.error(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
+            raise ValueError(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
+        
+        if self.llm is None:
+            raise ValueError("BrowserAgent LLM initialization failed.")
+
 
     async def conduct_research(self, research_task: str, max_steps: int = 20, use_vision: bool = False) -> Optional[Dict[str, Any]]:
         """
         Conducts research based on the given task using browser-use.
-
-        Args:
-            research_task (str): The specific research task for the agent.
-            max_steps (int): Maximum number of steps the browser agent can take.
-            use_vision (bool): Whether to enable vision capabilities (if supported by LLM and browser-use version).
-
-        Returns:
-            Optional[Dict[str, Any]]: The result from the browser-use agent, typically includes 'output'.
-                                      Returns None if LLM initialization failed or an error occurs.
         """
-        if self.llm is None:
-            logger.error("LLM not initialized. Cannot conduct research.")
+        if not self.agent_is_ready or self.llm is None:
+            logger.error("BrowserAgent or its LLM not initialized. Cannot conduct research.")
             return None
 
         logger.info(f"Starting browser-use research task: '{research_task[:100]}...' (Max steps: {max_steps})")
-        
         try:
-            # Create the browser-use Agent instance
-            agent = BrowserUseAgent(
+            agent = BrowserUseAgent( # This is the dynamically imported class
                 llm=self.llm,
                 task=research_task,
-                use_vision=use_vision, # Gemma 3 is primarily text, so vision might not be effective unless a multimodal version is used
-                # verbose=True, # Enable for detailed browser-use logging
-                # stop_sequences = ["Observation:", "Thought:"], # Example, may need tuning
+                use_vision=use_vision,
+                # verbose=True,
             )
-
-            # Run the agent
-            # The result format can vary; often it's a dictionary containing 'output'
-            # Or sometimes just a string.
-            # Ensure browser-use is installed with `playwright install chromium --with-deps`
             result = await agent.run(max_steps=max_steps)
-            
             logger.info("Browser-use research task completed.")
+
+            final_output_text = ""
             if isinstance(result, dict):
                 logger.debug(f"Browser agent raw result dictionary keys: {result.keys()}")
-                # It seems 'output' or 'answer' is common for the final response.
-                # If 'chat_history' is present, it can be very verbose.
-                # We primarily care about the final textual output.
-                final_output = result.get('output', result.get('answer', str(result)))
-                logger.info(f"Browser Agent Output: {str(final_output)[:500]}...") # Log a snippet
-                return {"output": final_output, "full_result": result} # Return a consistent structure
+                final_output_text = result.get('output', result.get('answer', str(result)))
             elif isinstance(result, str):
-                logger.info(f"Browser Agent Output (string): {result[:500]}...")
-                return {"output": result, "full_result": result}
+                final_output_text = result
             else:
-                logger.warning(f"Unexpected result type from browser-use agent: {type(result)}. Content: {str(result)[:500]}")
-                return {"output": str(result), "full_result": result}
+                final_output_text = str(result)
+                logger.warning(f"Unexpected result type from browser-use agent: {type(result)}. Content: {final_output_text[:500]}")
 
+            logger.info(f"Browser Agent Output: {final_output_text[:500]}...")
+            return {"output": final_output_text, "full_result": result}
 
-        except ImportError as ie:
-            logger.error(f"ImportError with browser-use: {ie}. Is Playwright installed correctly with dependencies (playwright install --with-deps chromium)?")
-            return None
         except Exception as e:
             logger.error(f"An error occurred while running the browser-use agent: {e}", exc_info=True)
-            logger.error("Possible issues: Ollama server, network, task complexity, or website automation challenges.")
+            logger.error("Possible issues: LLM server, network, task complexity, or website automation challenges.")
             return None
 
-# Example Usage
-async def main_browser_agent_example(settings_obj):
-    if not settings_obj:
-        logger.error("Settings not loaded for browser agent example.")
+async def main_browser_agent_example():
+    if not settings or not settings.browser_agent_enable:
+        logger.info("BrowserAgent is not enabled in settings or settings not loaded.")
+        return
+    if not settings.vertex_ai_project_id and settings.browser_agent_llm_provider == "VertexAI":
+        logger.error("Vertex AI Project ID not set for BrowserAgent. Set GOOGLE_APPLICATION_CREDENTIALS.")
         return
 
     try:
-        # Basic check if Ollama and model are available (optional pre-check)
-        ollama_test_llm = ChatOllama(model=settings_obj.sentiment_llm_model, temperature=0.1)
-        await ollama_test_llm.ainvoke("Hello") # Simple test
-        logger.info(f"Ollama ({settings_obj.sentiment_llm_model}) seems accessible for BrowserAgent.")
-        del ollama_test_llm
+        browser_agent = BrowserAgent()
+        if not browser_agent.agent_is_ready:
+            logger.error("Browser agent could not be initialized. Exiting example.")
+            return
     except Exception as e:
-        logger.error(f"Pre-check failed: Could not connect to Ollama or load {settings_obj.sentiment_llm_model}: {e}")
+        logger.error(f"Failed to create BrowserAgent: {e}")
         return
 
-    browser_agent = BrowserAgent(llm_model_name=settings_obj.sentiment_llm_model)
-    if browser_agent.llm is None: # Check if LLM init failed in constructor
-        return
-
-    # Define a research task
-    # Use specific keywords to guide the agent towards news.
-    # Explicitly ask for summarization and sources.
     task = (
-        "Investigate the recent news and general market sentiment for Ethereum (ETH) within the last 7-10 days. "
-        "Browse 2-3 reputable cryptocurrency news websites (e.g., CoinTelegraph, Decrypt, The Block, but avoid CoinDesk for this test). "
-        "Identify key news headlines, their sources, and briefly summarize the core message of each. "
-        "Conclude with an overall sentiment assessment (e.g., bullish, bearish, neutral, mixed) based on the findings. "
-        "Provide URLs for the articles found. "
-        "Limit your Browse to a maximum of 4 steps per website visited. "
-        "Focus on news related to price movements, technological updates (like upgrades), or significant partnerships."
+        "What is the latest news regarding Ethereum's price action and upcoming upgrades in June 2025? "
+        "Visit 2 reputable crypto news websites (e.g., Decrypt, Cointelegraph, but NOT CoinDesk). "
+        "Summarize findings and list article URLs. Limit Browse to 4 steps per site."
     )
-
-    result_data = await browser_agent.conduct_research(task, max_steps=25)
+    result_data = await browser_agent.conduct_research(task, max_steps=settings.browser_agent_max_steps or 25)
 
     if result_data and "output" in result_data:
         logger.info("\n--- Browser Agent Research Result ---")
-        # The output from browser-use can be a long string containing thoughts, actions, observations.
-        # We are interested in the final summarized answer.
         print(result_data["output"])
     elif result_data:
         logger.info("\n--- Browser Agent Raw Research Result ---")
@@ -549,29 +578,30 @@ async def main_browser_agent_example(settings_obj):
     else:
         logger.warning("Browser agent research did not produce a result or failed.")
 
-# if __name__ == "__main__":
-#     # from kamikaze_komodo.config.settings import settings
-#     # if settings:
-#     #    # Ensure Playwright browsers are installed: playwright install chromium --with-deps
-#     #    asyncio.run(main_browser_agent_example(settings))
-#     # else:
-#     #    print("Run this example from the project root or ensure settings are available.")
-#     pass
+if __name__ == "__main__":
+    # Ensure GOOGLE_APPLICATION_CREDENTIALS is set for Vertex AI
+    # Ensure Playwright browsers are installed: playwright install --with-deps chromium
+    # This example is best run if BrowserAgent_Enable is true in config.
+    if settings and settings.browser_agent_enable:
+        asyncio.run(main_browser_agent_example())
+    else:
+        print("BrowserAgent is not enabled in settings, or settings failed to load. Skipping example.")
+        print("To run, set BrowserAgent_Enable = True in config.ini and ensure Vertex AI is configured.")
 </code>
 
-kamikaze_komodo/ai_news_analysis_agent_module/news_scraper.py:
+kamikaze_komodo\ai_news_analysis_agent_module\news_scraper.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/news_scraper.py
 import asyncio
 import feedparser
-import newspaper
-import httpx # Using httpx for async requests, aiohttp is also good
+import newspaper # type: ignore
+import httpx
 from typing import List, Optional, Dict, Any
-from bs4 import BeautifulSoup # For more complex parsing if needed
-
+# from bs4 import BeautifulSoup # Keep for potential future direct HTML parsing needs
 from kamikaze_komodo.core.models import NewsArticle
 from kamikaze_komodo.app_logger import get_logger
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from kamikaze_komodo.config.settings import settings # Import global settings
 
 logger = get_logger(__name__)
 
@@ -579,71 +609,98 @@ class NewsScraper:
     """
     Scrapes news from specified sources (RSS feeds, websites).
     """
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config if config else {}
-        self.rss_feeds = self.config.get("rss_feeds", []) # List of dicts like {'name': 'CoinTelegraph', 'url': '...'}
-        self.websites = self.config.get("websites", []) # List of dicts for direct scraping {'name': 'CoinDesk', 'url': '...'}
-        
-        # Example sources from plan
-        # self.rss_feeds = [
-        #     {"name": "CoinTelegraph RSS", "url": "https://cointelegraph.com/rss"},
-        #     {"name": "SeekingAlpha Market Currents", "url": "https://seekingalpha.com/market_currents.xml"}
-        # ]
-        # self.websites_to_scrape = [ # For Newspaper3k or custom BS4
-        #     {"name": "CoinDesk", "url": "https://www.coindesk.com/"},
-        #     {"name": "CoinTelegraph", "url": "https://cointelegraph.com/"} # Besides RSS
-        # ]
-        logger.info(f"NewsScraper initialized. RSS feeds: {len(self.rss_feeds)}, Websites: {len(self.websites)}")
+    def __init__(self):
+        if not settings:
+            logger.critical("Settings not loaded. NewsScraper cannot be initialized.")
+            raise ValueError("Settings not loaded.")
+
+        scraper_config = settings.get_news_scraper_config()
+        self.rss_feeds: List[Dict[str, str]] = scraper_config.get("rss_feeds", [])
+        self.websites_to_scrape: List[Dict[str, str]] = scraper_config.get("websites", []) # For Newspaper3k or custom BS4
+
+        if not self.rss_feeds and not self.websites_to_scrape:
+            logger.warning("NewsScraper initialized, but no RSS feeds or websites are configured in settings.")
+        else:
+            logger.info(f"NewsScraper initialized. RSS feeds: {len(self.rss_feeds)}, Websites: {len(self.websites_to_scrape)}")
+            if self.rss_feeds:
+                logger.debug(f"Configured RSS Feeds: {[feed['name'] for feed in self.rss_feeds]}")
 
     async def _fetch_url_content(self, url: str) -> Optional[str]:
         try:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 KamikazeKomodoBot/1.0'}
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 KamikazeKomodoBot/1.0'
+                }
                 response = await client.get(url, headers=headers)
-                response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
+                response.raise_for_status()
                 return response.text
         except httpx.RequestError as e:
-            logger.error(f"Error fetching URL {url}: {e}")
+            logger.error(f"HTTP request error fetching URL {url}: {e}")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP status error fetching URL {url}: {e.response.status_code} - {e.response.text[:200]}")
         except Exception as e_gen:
-            logger.error(f"Generic error fetching URL {url}: {e_gen}")
+            logger.error(f"Generic error fetching URL {url}: {e_gen}", exc_info=True)
         return None
 
-    async def scrape_rss_feed(self, feed_name: str, feed_url: str, limit: int = 10) -> List[NewsArticle]:
-        """Scrapes a single RSS feed."""
+    async def scrape_rss_feed(self, feed_name: str, feed_url: str, limit: int = 15) -> List[NewsArticle]:
         articles: List[NewsArticle] = []
         logger.info(f"Scraping RSS feed: {feed_name} from {feed_url}")
+        
+        feed_content = await self._fetch_url_content(feed_url)
+        if not feed_content:
+            logger.warning(f"Could not fetch content for RSS feed {feed_name} ({feed_url}). Skipping.")
+            return articles
+
         try:
-            # feedparser is synchronous, run in executor for async context
             loop = asyncio.get_event_loop()
-            parsed_feed = await loop.run_in_executor(None, feedparser.parse, feed_url)
-            
-            if parsed_feed.bozo: # If non-None, indicates an error during parsing
+            # feedparser is synchronous
+            parsed_feed = await loop.run_in_executor(None, feedparser.parse, feed_content)
+
+            if parsed_feed.bozo:
                 logger.warning(f"Error parsing RSS feed {feed_name} ({feed_url}): {parsed_feed.bozo_exception}")
-                # Fallback or retry with httpx if feedparser fails badly due to network etc.
-                # content = await self._fetch_url_content(feed_url)
-                # if content:
-                #     parsed_feed = await loop.run_in_executor(None, feedparser.parse, content)
-                # else:
-                #     return articles # Could not fetch content
+            
+            if not parsed_feed.entries:
+                logger.info(f"No entries found in RSS feed: {feed_name} ({feed_url}).")
+                return articles
 
             for entry in parsed_feed.entries[:limit]:
                 title = entry.get("title")
                 link = entry.get("link")
-                published_time = entry.get("published_parsed")
+                if not title or not link:
+                    logger.debug(f"Skipping entry with missing title or link in {feed_name}: {entry.get('id', 'N/A')}")
+                    continue
+
+                published_time_struct = entry.get("published_parsed")
+                updated_time_struct = entry.get("updated_parsed")
                 
-                pub_date = None
-                if published_time:
+                pub_date: Optional[datetime] = None
+                time_struct_to_use = published_time_struct or updated_time_struct
+
+                if time_struct_to_use:
                     try:
-                        pub_date = datetime(*published_time[:6], tzinfo=timezone.utc)
+                        pub_date = datetime(*time_struct_to_use[:6], tzinfo=timezone.utc)
                     except Exception as e_date:
-                        logger.warning(f"Could not parse date for article '{title}': {published_time}, error: {e_date}")
+                        logger.warning(f"Could not parse date for article '{title}' from {feed_name}: {time_struct_to_use}, error: {e_date}")
+                
+                # Fallback if date parsing fails or not present
+                if pub_date is None:
+                    pub_date = datetime.now(timezone.utc) # Use retrieval time as a last resort
+                    logger.debug(f"Using current time as publication date for '{title}' from {feed_name} due to missing/unparseable date.")
+
 
                 article_id = link # Use URL as a unique ID
                 
-                # Use newspaper3k to get full content if desired, can be slow for many articles
-                # For now, let's take summary if available, or description
                 content_summary = entry.get("summary") or entry.get("description")
-
+                
+                # Attempt to extract related symbols from title or summary (basic)
+                related_symbols = []
+                text_for_symbols = (title + " " + (content_summary if content_summary else "")).lower()
+                # This is very basic; a proper NER would be better
+                common_crypto_symbols = {"btc", "bitcoin", "eth", "ethereum", "sol", "solana", "xrp", "ada", "cardano", "doge", "shib"}
+                for sym in common_crypto_symbols:
+                    if sym in text_for_symbols:
+                        related_symbols.append(sym.upper())
+                
                 articles.append(NewsArticle(
                     id=article_id,
                     url=link,
@@ -651,150 +708,200 @@ class NewsScraper:
                     publication_date=pub_date,
                     retrieval_date=datetime.now(timezone.utc),
                     source=feed_name,
-                    content=None, # Full content fetch can be added here or later
-                    summary=content_summary
+                    content=None, # Full content fetch can be added here or later by newspaper3k
+                    summary=content_summary,
+                    related_symbols=list(set(related_symbols)) # Unique symbols
                 ))
             logger.info(f"Found {len(articles)} articles from RSS feed: {feed_name}")
         except Exception as e:
-            logger.error(f"Failed to scrape RSS feed {feed_name} ({feed_url}): {e}", exc_info=True)
+            logger.error(f"Failed to process RSS feed {feed_name} ({feed_url}): {e}", exc_info=True)
         return articles
 
     async def scrape_website_with_newspaper(self, site_name: str, site_url: str, limit_articles: int = 5) -> List[NewsArticle]:
-        """Scrapes a website using Newspaper3k."""
+        """Scrapes a website using Newspaper3k. Be mindful of terms of service."""
         articles_data: List[NewsArticle] = []
-        logger.info(f"Scraping website: {site_name} ({site_url}) with Newspaper3k")
+        logger.info(f"Scraping website: {site_name} ({site_url}) with Newspaper3k (limit: {limit_articles})")
+        
+        # Newspaper3k config
+        config_np = newspaper.Config()
+        config_np.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 KamikazeKomodoBot/1.0'
+        config_np.request_timeout = 15
+        config_np.memoize_articles = False # Disable caching for fresh data
+        config_np.fetch_images = False # Don't need images
+        config_np.verbose = False # newspaper's own verbosity
+
         try:
-            # Newspaper3k is synchronous, consider running parts in executor or using an async alternative if performance is critical for many sites.
-            # For a few primary sites, this might be acceptable.
             loop = asyncio.get_event_loop()
-            
-            paper = await loop.run_in_executor(None, newspaper.build, site_url, {'memoize_articles': False, 'request_timeout': 15, 'browser_user_agent': 'Mozilla/5.0 KamikazeKomodoBot/1.0'})
+            paper = await loop.run_in_executor(None, newspaper.build, site_url, config_np)
             
             count = 0
             for article_raw in paper.articles:
                 if count >= limit_articles:
                     break
                 try:
+                    # Download and parse article content
                     await loop.run_in_executor(None, article_raw.download)
                     if not article_raw.is_downloaded:
                         logger.warning(f"Failed to download article: {article_raw.url} from {site_name}")
                         continue
-                        
                     await loop.run_in_executor(None, article_raw.parse)
-                    
+
                     title = article_raw.title
                     url = article_raw.url
+                    if not title or not url:
+                        logger.debug(f"Skipping article with no title/url from {site_name}")
+                        continue
+
                     content = article_raw.text
-                    pub_date_dt = article_raw.publish_date
+                    summary_np = article_raw.summary # newspaper3k summary
                     
-                    # Ensure pub_date_dt is timezone-aware (UTC)
+                    pub_date_dt = article_raw.publish_date
                     if pub_date_dt and pub_date_dt.tzinfo is None:
-                        pub_date_dt = pub_date_dt.replace(tzinfo=timezone.utc) # Assume UTC if naive
+                        pub_date_dt = pub_date_dt.replace(tzinfo=timezone.utc) # Assume UTC if naive, or local if known
+                    elif pub_date_dt is None:
+                        pub_date_dt = datetime.now(timezone.utc) # Fallback
+                    
+                    related_symbols_np = []
+                    text_for_symbols_np = (title + " " + (summary_np if summary_np else "") + " " + (content if content else "")).lower()
+                    common_crypto_symbols_np = {"btc", "bitcoin", "eth", "ethereum", "sol", "solana", "xrp", "ada", "cardano", "doge", "shib"}
+                    for sym_np in common_crypto_symbols_np:
+                        if sym_np in text_for_symbols_np:
+                            related_symbols_np.append(sym_np.upper())
 
                     articles_data.append(NewsArticle(
-                        id=url,
-                        url=url,
-                        title=title,
+                        id=url, url=url, title=title,
                         publication_date=pub_date_dt,
                         retrieval_date=datetime.now(timezone.utc),
                         source=site_name,
-                        content=content,
-                        summary=None # Newspaper3k can generate summary: article_raw.summary (requires NLP)
+                        content=content if content else None,
+                        summary=summary_np if summary_np else None,
+                        related_symbols=list(set(related_symbols_np))
                     ))
                     count += 1
                     logger.debug(f"Successfully scraped: {url} from {site_name}")
                 except Exception as e_article:
-                    logger.warning(f"Error processing article {article_raw.url} from {site_name}: {e_article}")
+                    logger.warning(f"Error processing article {article_raw.url} from {site_name} with Newspaper3k: {e_article}", exc_info=True)
+            
             logger.info(f"Scraped {len(articles_data)} articles from {site_name} using Newspaper3k.")
         except Exception as e:
             logger.error(f"Failed to scrape website {site_name} ({site_url}) with Newspaper3k: {e}", exc_info=True)
         return articles_data
 
-
-    async def scrape_all(self, limit_per_source: int = 10) -> List[NewsArticle]:
-        """Scrapes all configured RSS feeds and websites."""
+    async def scrape_all(self, limit_per_source: int = 10, since_hours_rss: Optional[int] = 24) -> List[NewsArticle]:
+        """
+        Scrapes all configured RSS feeds and websites.
+        For RSS, optionally filters articles published within `since_hours_rss`.
+        """
         all_articles: List[NewsArticle] = []
         
         # Scrape RSS Feeds
         rss_tasks = []
-        for feed_info in self.rss_feeds:
-            rss_tasks.append(self.scrape_rss_feed(feed_info['name'], feed_info['url'], limit=limit_per_source))
+        if self.rss_feeds:
+            for feed_info in self.rss_feeds:
+                rss_tasks.append(self.scrape_rss_feed(feed_info['name'], feed_info['url'], limit=limit_per_source))
         
-        rss_results = await asyncio.gather(*rss_tasks, return_exceptions=True)
-        for result in rss_results:
-            if isinstance(result, list):
-                all_articles.extend(result)
-            elif isinstance(result, Exception):
-                logger.error(f"RSS scraping task failed: {result}")
+            rss_results_list = await asyncio.gather(*rss_tasks, return_exceptions=True)
+            for result in rss_results_list:
+                if isinstance(result, list):
+                    all_articles.extend(result)
+                elif isinstance(result, Exception):
+                    logger.error(f"RSS scraping task failed: {result}", exc_info=True) # Log exception details
+        else:
+            logger.info("No RSS feeds configured to scrape.")
 
-        # Scrape Websites (e.g., using Newspaper3k)
+        # Filter RSS articles by publication date if since_hours_rss is provided
+        if since_hours_rss is not None:
+            cutoff_date = datetime.now(timezone.utc) - timedelta(hours=since_hours_rss)
+            filtered_articles = []
+            for article in all_articles:
+                if article.publication_date and article.publication_date >= cutoff_date:
+                    filtered_articles.append(article)
+                elif not article.publication_date: # If no pub date, include it (conservative)
+                    filtered_articles.append(article)
+            count_removed = len(all_articles) - len(filtered_articles)
+            if count_removed > 0:
+                logger.info(f"Filtered out {count_removed} RSS articles older than {since_hours_rss} hours.")
+            all_articles = filtered_articles
+
+        # Scrape Websites (e.g., using Newspaper3k) - typically gets latest, less date control
         website_tasks = []
-        for site_info in self.websites: # Assuming 'websites' config like RSS for now
-            website_tasks.append(self.scrape_website_with_newspaper(site_info['name'], site_info['url'], limit_articles=limit_per_source))
+        if self.websites_to_scrape:
+            for site_info in self.websites_to_scrape:
+                website_tasks.append(self.scrape_website_with_newspaper(site_info['name'], site_info['url'], limit_articles=limit_per_source))
         
-        website_results = await asyncio.gather(*website_tasks, return_exceptions=True)
-        for result in website_results:
-            if isinstance(result, list):
-                all_articles.extend(result)
-            elif isinstance(result, Exception):
-                logger.error(f"Website scraping task failed: {result}")
-        
+            website_results_list = await asyncio.gather(*website_tasks, return_exceptions=True)
+            for result in website_results_list:
+                if isinstance(result, list):
+                    all_articles.extend(result)
+                elif isinstance(result, Exception):
+                    logger.error(f"Website scraping task failed: {result}", exc_info=True)
+        else:
+            logger.info("No direct websites configured to scrape with Newspaper3k.")
+            
         # Deduplicate articles by URL (ID)
-        unique_articles_dict = {article.id: article for article in all_articles}
-        unique_articles_list = list(unique_articles_dict.values())
+        unique_articles_dict: Dict[str, NewsArticle] = {}
+        for article in all_articles:
+            if article.id not in unique_articles_dict:
+                 unique_articles_dict[article.id] = article
+            else: # If duplicate, prefer the one with more content or later retrieval
+                existing_article = unique_articles_dict[article.id]
+                if (article.content and not existing_article.content) or \
+                   (article.retrieval_date > existing_article.retrieval_date):
+                    unique_articles_dict[article.id] = article
+
+        unique_articles_list = sorted(list(unique_articles_dict.values()), key=lambda x: x.publication_date or x.retrieval_date, reverse=True)
         
         logger.info(f"Total unique articles scraped from all sources: {len(unique_articles_list)}")
         return unique_articles_list
 
-# Example Usage (for testing)
-async def main_scraper_example(settings_instance):
-    """ Example of using the NewsScraper """
-    scraper_config = {
-        "rss_feeds": [
-            {"name": "CoinTelegraph RSS", "url": settings_instance.rss_feed_cointelegraph},
-            {"name": "SeekingAlpha Market Currents", "url": settings_instance.rss_feed_seeking_alpha}
-        ] if settings_instance else [],
-        "websites": [ # Example: add website scraping tasks here if desired for Newspaper3k
-             {"name": "CoinDesk", "url": "https://www.coindesk.com/consensus-magazine/"}, # Specific section
-             # {"name": "CoinTelegraph", "url": "https://cointelegraph.com/"} # Main site can be heavy
-        ] if settings_instance else []
-    }
-    scraper = NewsScraper(config=scraper_config)
+async def main_scraper_example():
+    if not settings or not settings.news_scraper_enable:
+        logger.info("NewsScraper is not enabled in settings or settings not loaded.")
+        return
+
+    scraper = NewsScraper()
     
-    # Scrape specific RSS feed
-    # ct_articles = await scraper.scrape_rss_feed("CoinTelegraph RSS", scraper_config['rss_feeds'][0]['url'])
-    # for article in ct_articles[:2]:
-    #     print(f"Title: {article.title}, URL: {article.url}, Source: {article.source}, Date: {article.publication_date}")
-
-    # Scrape specific website
-    # coindesk_articles = await scraper.scrape_website_with_newspaper("CoinDesk", scraper_config['websites'][0]['url'], limit_articles=2)
-    # for article in coindesk_articles:
-    #      print(f"Site: {article.source}, Title: {article.title}, URL: {article.url}, Date: {article.publication_date}, Content len: {len(article.content) if article.content else 0}")
-
-
-    # Scrape all configured sources
-    all_scraped_articles = await scraper.scrape_all(limit_per_source=3) # Limit to 3 articles per source for example
+    # Scrape all configured sources, limiting to 5 articles per source,
+    # and only RSS articles from the last 48 hours
+    all_scraped_articles = await scraper.scrape_all(limit_per_source=5, since_hours_rss=48)
+    
     logger.info(f"--- All Scraped Articles ({len(all_scraped_articles)}) ---")
-    for i, article in enumerate(all_scraped_articles):
-        logger.info(f"{i+1}. Source: {article.source}, Title: {article.title}, Date: {article.publication_date}, URL: {article.url}")
+    if not all_scraped_articles:
+        logger.info("No articles were scraped.")
+        return
+
+    for i, article in enumerate(all_scraped_articles[:10]): # Log details for first 10
+        logger.info(f"{i+1}. Source: {article.source}, Title: {article.title}")
+        logger.info(f"   URL: {article.url}")
+        logger.info(f"   Date: {article.publication_date}, Retrieved: {article.retrieval_date}")
+        logger.info(f"   Symbols: {article.related_symbols}")
         if article.summary:
-            logger.info(f"   Summary: {article.summary[:100]}...")
+            logger.info(f"   Summary: {article.summary[:150]}...")
         # if article.content: # Content can be very long
-        #    logger.info(f"   Content: {article.content[:100]}...")
+            # logger.info(f" Content Preview: {article.content[:100]}...")
+    
+    # Example: Store articles in DB
+    if all_scraped_articles:
+        from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+        db_manager = DatabaseManager()
+        db_manager.store_news_articles(all_scraped_articles)
+        logger.info(f"Stored {len(all_scraped_articles)} articles in the database.")
+        
+        # Retrieve and show some from DB
+        retrieved = db_manager.retrieve_news_articles(limit=5)
+        logger.info(f"--- Retrieved {len(retrieved)} articles from DB ---")
+        for art_db in retrieved:
+            logger.info(f"DB: {art_db.title} (Source: {art_db.source}, Date: {art_db.publication_date})")
+        db_manager.close()
 
-
-# if __name__ == "__main__":
-#     # This is a placeholder for running the example.
-#     # You'd need to ensure 'settings' is loaded or pass config directly.
-#     # from kamikaze_komodo.config.settings import settings as app_settings
-#     # if app_settings:
-#     #    asyncio.run(main_scraper_example(app_settings))
-#     # else:
-#     #    print("App settings not loaded, cannot run scraper example.")
-#     pass
+if __name__ == "__main__":
+    if settings and settings.news_scraper_enable:
+        asyncio.run(main_scraper_example())
+    else:
+        print("NewsScraper is not enabled in settings, or settings failed to load. Skipping example.")
 </code>
 
-kamikaze_komodo/ai_news_analysis_agent_module/notification_listener.py:
+kamikaze_komodo\ai_news_analysis_agent_module\notification_listener.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/notification_listener.py
 from kamikaze_komodo.app_logger import get_logger
@@ -931,72 +1038,97 @@ async def dummy_notification_callback(notification_details: Dict[str, Any]):
 #         logger.info("Notification listener example stopped by user.")
 </code>
 
-kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py:
+kamikaze_komodo\ai_news_analysis_agent_module\sentiment_analyzer.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py
 from typing import List, Dict, Optional, Any
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.pydantic_v1 import BaseModel, Field as PydanticField
-
-# Assuming local Ollama setup as per testOllama.py and testBrowserUse.py
-from langchain_ollama import ChatOllama
-
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.core.models import NewsArticle
+from kamikaze_komodo.config.settings import settings # Import global settings
 
 logger = get_logger(__name__)
 
 # Pydantic model for structured sentiment output
 class SentimentAnalysisOutput(BaseModel):
-    sentiment_label: str = PydanticField(description="The overall sentiment (e.g., 'positive', 'negative', 'neutral', 'mixed', 'bullish', 'bearish').")
+    sentiment_label: str = PydanticField(description="The overall sentiment (e.g., 'very bullish', 'bullish', 'neutral', 'bearish', 'very bearish', 'mixed').")
     sentiment_score: float = PydanticField(description="A numerical score from -1.0 (very negative) to 1.0 (very positive). Neutral is 0.0.")
-    key_themes: Optional[List[str]] = PydanticField(description="List of key themes or topics identified in the text related to sentiment.")
+    key_themes: Optional[List[str]] = PydanticField(default_factory=list, description="List of key themes or topics identified in the text related to sentiment.")
     confidence: Optional[float] = PydanticField(description="Confidence score of the sentiment analysis (0.0 to 1.0).")
-
 
 class SentimentAnalyzer:
     """
-    Analyzes text for sentiment using a local LLM via Langchain and Ollama.
+    Analyzes text for sentiment using a configured LLM via Langchain.
+    Supports Google Vertex AI.
     """
-    def __init__(self, llm_model_name: str = "gemma3:12b", ollama_base_url: Optional[str] = None):
-        self.llm_model_name = llm_model_name
-        try:
-            llm_params = {"model": self.llm_model_name, "temperature": 0.1}
-            if ollama_base_url:
-                llm_params["base_url"] = ollama_base_url
-            
-            self.llm = ChatOllama(**llm_params)
-            logger.info(f"SentimentAnalyzer initialized with LLM: {self.llm_model_name}")
-        except Exception as e:
-            logger.error(f"Failed to initialize Ollama LLM ({self.llm_model_name}): {e}. Ensure Ollama is running and model is pulled.")
-            raise
+    def __init__(self):
+        if not settings:
+            logger.critical("Settings not loaded. SentimentAnalyzer cannot be initialized.")
+            raise ValueError("Settings not loaded.")
 
-        # Define a more structured prompt for sentiment analysis
+        self.llm_provider = settings.sentiment_llm_provider
+        self.llm: Any = None # Will be initialized in _initialize_llm
+
+        self._initialize_llm()
+
+        # Define a structured prompt for sentiment analysis
         self.prompt_template = ChatPromptTemplate.from_messages(
             [
-                ("system", 
+                ("system",
                  "You are an expert financial sentiment analyst specializing in cryptocurrency markets. "
                  "Analyze the provided text for its sentiment towards the cryptocurrency or market mentioned. "
                  "Consider factors like news events, market reactions, technological developments, and regulatory news. "
-                 "Your output MUST be in JSON format, following this structure: "
-                 "{{\"sentiment_label\": \"<label>\", \"sentiment_score\": <score_float>, \"key_themes\": [\"<theme1>\", \"<theme2>\"], \"confidence\": <confidence_float>}}."
-                 "Possible sentiment_labels: 'very bullish', 'bullish', 'neutral', 'bearish', 'very bearish', 'mixed'. "
+                 "Your output MUST be in JSON format, adhering to the following Pydantic model: "
+                 "```json\n"
+                 "{\n"
+                 "  \"sentiment_label\": \"<label: 'very bullish'|'bullish'|'neutral'|'bearish'|'very bearish'|'mixed'>\",\n"
+                 "  \"sentiment_score\": <score_float: -1.0 to 1.0>,\n"
+                 "  \"key_themes\": [\"<theme1>\", \"<theme2>\"],\n"
+                 "  \"confidence\": <confidence_float: 0.0 to 1.0>\n"
+                 "}\n"
+                 "```"
                  "sentiment_score should range from -1.0 (very bearish/negative) to 1.0 (very bullish/positive). Neutral is 0.0. "
                  "key_themes should highlight important topics influencing the sentiment. confidence is your perceived accuracy of this analysis (0.0 to 1.0)."
                  ),
                 ("human", "Please analyze the sentiment of the following text regarding {asset_context}:\n\n---\n{text_to_analyze}\n---"),
             ]
         )
-        
-        # Output parser for structured JSON
         self.output_parser = JsonOutputParser(pydantic_object=SentimentAnalysisOutput)
-        
-        # For simpler string output if JSON fails or for basic sentiment
-        self.string_output_parser = StrOutputParser()
-
         self.chain = self.prompt_template | self.llm | self.output_parser
 
+    def _initialize_llm(self):
+        logger.info(f"Initializing LLM for SentimentAnalyzer with provider: {self.llm_provider}")
+        if self.llm_provider == "VertexAI":
+            if not settings.vertex_ai_project_id or not settings.vertex_ai_location:
+                logger.error("Vertex AI project ID or location is not configured in settings.py. Sentiment analysis will not work.")
+                raise ValueError("Vertex AI project ID or location missing.")
+            try:
+                from langchain_google_vertexai import ChatVertexAI
+                self.llm = ChatVertexAI(
+                    project=settings.vertex_ai_project_id,
+                    location=settings.vertex_ai_location,
+                    model_name=settings.vertex_ai_sentiment_model_name,
+                    temperature=0.1,
+                    # max_output_tokens=1024, # Optional: if needed
+                )
+                logger.info(f"SentimentAnalyzer initialized with Vertex AI model: {settings.vertex_ai_sentiment_model_name}")
+                logger.info("Ensure Google Cloud credentials (GOOGLE_APPLICATION_CREDENTIALS) are set in your environment.")
+            except ImportError:
+                logger.error("langchain-google-vertexai is not installed. Please install it: pip install langchain-google-vertexai")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to initialize Vertex AI LLM ({settings.vertex_ai_sentiment_model_name}): {e}", exc_info=True)
+                raise
+
+        else:
+            logger.error(f"Unsupported LLM provider: {self.llm_provider}")
+            raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
+
+        if self.llm is None:
+            logger.error("LLM could not be initialized.")
+            raise ValueError("LLM initialization failed.")
 
     async def analyze_sentiment_structured(self, text: str, asset_context: str = "the market") -> Optional[SentimentAnalysisOutput]:
         """
@@ -1006,34 +1138,36 @@ class SentimentAnalyzer:
             logger.warning("No text provided for sentiment analysis.")
             return None
         
+        if self.llm is None:
+            logger.error("LLM not initialized. Cannot analyze sentiment.")
+            return None
+
         logger.debug(f"Analyzing sentiment for text (context: {asset_context}): '{text[:200]}...'")
         try:
-            # Shorten text if too long for the model's context window (gemma3 typically 8k tokens)
             # A more robust solution would use token counting. This is a simple character limit.
-            max_chars = 12000 # Approx 3k-4k tokens, depends on text.
+            # Gemini Flash models usually have a large context window (e.g., 128k tokens for gemini-1.5-flash variants)
+            # but the older flash might be 32k. Max input tokens for gemini-2.5-flash-preview is high, let's be generous.
+            # The prompt itself consumes tokens.
+            max_chars = 25000 # Approx 6k-8k tokens.
             if len(text) > max_chars:
                 logger.warning(f"Text too long ({len(text)} chars), truncating to {max_chars} for sentiment analysis.")
                 text = text[:max_chars]
 
             response = await self.chain.ainvoke({"text_to_analyze": text, "asset_context": asset_context})
             
-            # The response should already be a dict parsed into SentimentAnalysisOutput by JsonOutputParser
-            if isinstance(response, dict): # If JsonOutputParser worked
-                 # Validate with Pydantic model if not automatically done (JsonOutputParser should do it)
+            if isinstance(response, dict):
                 try:
                     validated_output = SentimentAnalysisOutput(**response)
-                    logger.info(f"Structured sentiment analysis for '{asset_context}': Label: {validated_output.sentiment_label}, Score: {validated_output.sentiment_score:.2f}, Confidence: {validated_output.confidence}")
+                    logger.info(f"Structured sentiment for '{asset_context}': Label: {validated_output.sentiment_label}, Score: {validated_output.sentiment_score:.2f}, Confidence: {validated_output.confidence}")
                     return validated_output
-                except Exception as p_exc: # PydanticValidationError
+                except Exception as p_exc: 
                     logger.error(f"Pydantic validation failed for LLM JSON output: {response}. Error: {p_exc}")
                     return None
-            else: # Fallback or unexpected output type
+            else:
                 logger.error(f"Unexpected structured sentiment analysis output type: {type(response)}. Content: {response}")
                 return None
-
         except Exception as e:
-            logger.error(f"Error during structured sentiment analysis with LLM {self.llm_model_name}: {e}", exc_info=True)
-            # Fallback: try a simpler prompt if structured fails? Or just return None.
+            logger.error(f"Error during structured sentiment analysis with {self.llm_provider} model: {e}", exc_info=True)
             return None
 
     async def get_sentiment_for_article(self, article: NewsArticle, asset_context: Optional[str] = None) -> NewsArticle:
@@ -1044,46 +1178,55 @@ class SentimentAnalyzer:
         if not asset_context and article.related_symbols:
             asset_context = ", ".join(article.related_symbols)
         elif not asset_context:
-            asset_context = "the cryptocurrency market"
+            # Try to infer from title if no symbols
+            # This is a simple heuristic; more advanced would be NER
+            if "bitcoin" in article.title.lower() or "btc" in article.title.lower():
+                 asset_context = "Bitcoin"
+            elif "ethereum" in article.title.lower() or "eth" in article.title.lower():
+                 asset_context = "Ethereum"
+            else:
+                 asset_context = "the cryptocurrency market"
 
         text_to_analyze = article.title
         if article.summary:
             text_to_analyze += "\n\n" + article.summary
-        elif article.content:
+        elif article.content: # Fallback to content if no summary
             text_to_analyze += "\n\n" + article.content
 
         if not text_to_analyze.strip():
             logger.warning(f"No text content found in article {article.id} to analyze.")
-            return article
+            return article # Return original article if no text
 
         sentiment_result = await self.analyze_sentiment_structured(text_to_analyze, asset_context=asset_context)
 
         if sentiment_result:
             article.sentiment_label = sentiment_result.sentiment_label
             article.sentiment_score = sentiment_result.sentiment_score
-            # article.custom_fields = article.custom_fields or {} # If using custom fields
-            # article.custom_fields['sentiment_key_themes'] = sentiment_result.key_themes
-            # article.custom_fields['sentiment_confidence'] = sentiment_result.confidence
+            article.key_themes = sentiment_result.key_themes
+            article.sentiment_confidence = sentiment_result.confidence
+            # article.raw_llm_response can store the full dict if needed for debugging
+            # article.raw_llm_response = sentiment_result.model_dump() # Stores the Pydantic model as dict
         return article
 
 # Example Usage
-async def main_sentiment_example(settings_obj):
+async def main_sentiment_example():
     """ Example of using the SentimentAnalyzer """
-    if not settings_obj:
-        logger.error("Settings not loaded for sentiment example.")
+    if not settings or not settings.vertex_ai_project_id:
+        logger.error("Vertex AI settings (Project ID) not loaded for sentiment example. Set GOOGLE_APPLICATION_CREDENTIALS.")
         return
 
     try:
-        analyzer = SentimentAnalyzer(llm_model_name=settings_obj.sentiment_llm_model)
+        analyzer = SentimentAnalyzer()
     except Exception as e:
         logger.error(f"Could not start SentimentAnalyzer: {e}")
         return
 
     example_texts = [
-        ("Bitcoin surges past $70,000, analysts predict further upside due to ETF inflows.", "Bitcoin"),
-        ("Regulatory crackdown imminent? SEC chair issues stark warning on crypto staking.", "Cryptocurrency Regulation"),
-        ("Ethereum's Dencun upgrade goes live, promising lower fees for Layer 2s.", "Ethereum"),
-        ("The crypto market remains flat this week with low volatility and trading volume.", "the crypto market")
+        ("Bitcoin surges past $70,000, analysts predict further upside due to ETF inflows and positive market structure.", "Bitcoin"),
+        ("Regulatory crackdown imminent? SEC chair issues stark warning on crypto staking, leading to market jitters.", "Cryptocurrency Regulation"),
+        ("Ethereum's Dencun upgrade successfully goes live on mainnet, promising significantly lower fees for Layer 2 solutions and boosting scalability.", "Ethereum"),
+        ("The crypto market remains flat this week with low volatility and trading volume, investors seem hesitant.", "the crypto market"),
+        ("Solana's network outage causes temporary panic, but recovery was swift. Developers are addressing the root cause.", "Solana")
     ]
 
     for text, context in example_texts:
@@ -1091,44 +1234,40 @@ async def main_sentiment_example(settings_obj):
         logger.info(f"Text: {text}")
         result = await analyzer.analyze_sentiment_structured(text, asset_context=context)
         if result:
-            logger.info(f"Sentiment Label: {result.sentiment_label}")
-            logger.info(f"Sentiment Score: {result.sentiment_score:.3f}")
-            logger.info(f"Key Themes: {result.key_themes}")
-            logger.info(f"Confidence: {result.confidence}")
+            logger.info(f"  Sentiment Label: {result.sentiment_label}")
+            logger.info(f"  Sentiment Score: {result.sentiment_score:.3f}")
+            logger.info(f"  Key Themes: {result.key_themes}")
+            logger.info(f"  Confidence: {result.confidence}")
         else:
-            logger.warning("Failed to get structured sentiment analysis.")
+            logger.warning("  Failed to get structured sentiment analysis.")
 
-    # Example with NewsArticle
     sample_article = NewsArticle(
-        id="test_article_123",
-        url="http://example.com/news1",
-        title="Groundbreaking Partnership Announced for Solana Ecosystem Development",
-        summary="Solana Foundation today announced a strategic partnership with a major tech firm to boost its ecosystem infrastructure and developer tools. The SOL token reacted positively, climbing 5% in the last hour.",
-        source="Test News Provider",
+        id="test_article_sol_123",
+        url="http://example.com/news_sol_1",
+        title="Solana Ecosystem Sees Major Investment for DeFi Growth",
+        summary="The Solana Foundation has announced a new $100 million fund dedicated to fostering DeFi projects on its blockchain. This move is expected to attract more developers and users, with SOL token price reacting positively.",
+        source="Crypto News Daily",
         related_symbols=["SOL", "Solana"]
     )
     logger.info(f"\n--- Analyzing NewsArticle: {sample_article.title} ---")
     updated_article = await analyzer.get_sentiment_for_article(sample_article)
-    logger.info(f"Analyzed Article Sentiment: Label='{updated_article.sentiment_label}', Score={updated_article.sentiment_score}")
+    logger.info(f"  Analyzed Article Sentiment: Label='{updated_article.sentiment_label}', Score={updated_article.sentiment_score}, Themes: {updated_article.key_themes}")
 
-
-# if __name__ == "__main__":
-#     # from kamikaze_komodo.config.settings import settings
-#     # if settings:
-#     #    asyncio.run(main_sentiment_example(settings))
-#     # else:
-#     #    print("Run this example from the project root or ensure settings are available.")
-#     pass
+if __name__ == "__main__":
+    import asyncio
+    # Ensure GOOGLE_APPLICATION_CREDENTIALS is set in your environment
+    # e.g., export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json"
+    asyncio.run(main_sentiment_example())
 </code>
 
-kamikaze_komodo/ai_news_analysis_agent_module/__init__.py:
+kamikaze_komodo\ai_news_analysis_agent_module\__init__.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/__init__.py
 # This file makes the 'ai_news_analysis_agent_module' directory a Python package.
 logger_name = "KamikazeKomodo.ai_news_analysis_agent_module" # Satisfy linter
 </code>
 
-kamikaze_komodo/backtesting_engine/engine.py:
+kamikaze_komodo\backtesting_engine\engine.py:
 <code>
 # kamikaze_komodo/backtesting_engine/engine.py
 # Significantly updated to integrate PositionSizer and StopManager
@@ -1464,7 +1603,7 @@ class BacktestingEngine:
         return self.trades_log, final_portfolio_state
 </code>
 
-kamikaze_komodo/backtesting_engine/performance_analyzer.py:
+kamikaze_komodo\backtesting_engine\performance_analyzer.py:
 <code>
 # kamikaze_komodo/backtesting_engine/performance_analyzer.py
 import pandas as pd
@@ -1702,100 +1841,125 @@ if __name__ == '__main__':
     # print(equity)
 </code>
 
-kamikaze_komodo/backtesting_engine/__init__.py:
+kamikaze_komodo\backtesting_engine\__init__.py:
 <code>
 # kamikaze_komodo/backtesting_engine/__init__.py
 # This file makes the 'backtesting_engine' directory a Python package.
 </code>
 
-kamikaze_komodo/config/config.ini:
+kamikaze_komodo\config\config.ini:
 <code>
 # kamikaze_komodo/config/config.ini
-# Added Phase 3 and Phase 4 settings
-
+# Added Phase 3 and Phase 4 settings, Vertex AI settings, and RSS feeds
 [General]
 LogLevel = INFO
 LogFilePath = logs/kamikaze_komodo.log
 
 [API]
-ExchangeID = krakenfutures 
-KrakenTestnet = True      
+ExchangeID = krakenfutures
+KrakenTestnet = True
 
 [DataFetching]
-DefaultSymbol = PF_XBTUSD      
-DefaultTimeframe = 4h     
+DefaultSymbol = PF_XBTUSD
+DefaultTimeframe = 4h
 HistoricalDataDays = 365
-DataFetchLimitPerCall = 500 
+DataFetchLimitPerCall = 500
 ; For paginated historical data
 
 [Trading]
-MaxPortfolioRisk = 0.02 
+MaxPortfolioRisk = 0.02
 DefaultLeverage = 1.0
-CommissionBPS = 10 
+CommissionBPS = 10
 ; Basis points, e.g. 10 bps = 0.1% = 0.001 rate
 
 [EWMAC_Strategy]
 ShortWindow = 12
 LongWindow = 26
-SignalWindow = 9 
+SignalWindow = 9
+; ATR period for strategy's internal ATR calculation (if any)
+atr_period = 14
 
 ; --- Phase 3 Settings ---
 [RiskManagement]
-PositionSizer = FixedFractional 
+PositionSizer = ATRBased
 ; Options: FixedFractional, ATRBased
-FixedFractional_AllocationFraction = 0.10 
+FixedFractional_AllocationFraction = 0.10
 ; Fraction of *equity* to allocate to a new position
-ATRBased_RiskPerTradeFraction = 0.01 
+ATRBased_RiskPerTradeFraction = 0.01
 ; Fraction of *equity* to risk per trade (requires ATR from strategy/bar)
-ATRBased_ATRMultipleForStop = 2.0 
+ATRBased_ATRMultipleForStop = 2.0
 ; How many ATRs away the stop is placed for sizing calculation
 
-StopManager_Default = PercentageBased 
+StopManager_Default = ATRBased
 ; Options: PercentageBased, ATRBased (ATRBased needs ATR on trade/bar)
-PercentageStop_LossPct = 0.02 
+PercentageStop_LossPct = 0.02
 ; 2% stop loss from entry. Set to 0 or None to disable.
-PercentageStop_TakeProfitPct = 0.05 
+PercentageStop_TakeProfitPct = 0.05
 ; 5% take profit from entry. Set to 0 or None to disable.
-ATRStop_ATRMultiple = 2.0 
-; For ATRStopManager if used.
+ATRStop_ATRMultiple = 2.0
+; For ATRStopManager if used. Needs ATR at trade entry.
 
 [PortfolioConstructor]
-AssetAllocator = FixedWeight 
+AssetAllocator = FixedWeight
 ; For now, mainly conceptual for single asset backtest
-DefaultAllocation_BTCUSD = 1.0 
+DefaultAllocation_BTCUSD = 1.0
 ; Example: PF_XBTUSD if using Kraken Futures symbol
-Rebalancer_DeviationThreshold = 0.05 
+Rebalancer_DeviationThreshold = 0.05
 ; For BasicRebalancer (conceptual for now)
 
 ; --- Phase 4 Settings ---
 [AI_NewsAnalysis]
 EnableSentimentAnalysis = True
-SentimentLLMModel = gemma3:12b 
-SentimentFilter_Threshold_Long = 0.1 
+SentimentLLMProvider = VertexAI
+; Options: VertexAI, Ollama (Ollama is now legacy for this project)
+SentimentFilter_Threshold_Long = 0.1
 ; Example: Only take LONG if sentiment > 0.1
-SentimentFilter_Threshold_Short = -0.1 
+SentimentFilter_Threshold_Short = -0.1
 ; Example: Only take SHORT if sentiment < -0.1 (if shorting implemented)
-SimulatedSentimentDataPath = data/simulated_sentiment_data.csv 
+SimulatedSentimentDataPath = data/simulated_sentiment_data.csv
 ; For backtesting
-
 NewsScraper_Enable = True
-RSSFeed_CoinTelegraph = https://cointelegraph.com/rss
-RSSFeed_SeekingAlpha = https://seekingalpha.com/market_currents.xml
-# Add more RSS feeds or website direct scrape configs if needed
-# Example: WebsiteScrape_CoinDesk_URL = https://www.coindesk.com/
-# WebsiteScrape_CoinDesk_Name = CoinDesk
-
-NotificationListener_Enable = False 
+NotificationListener_Enable = False
 ; Jeepney D-Bus listener is mostly placeholder
-
-BrowserAgent_Enable = False 
+BrowserAgent_Enable = False
 ; browser-use agent is resource intensive, enable for specific tasks
-BrowserAgent_LLMModel = gemma3:12b 
-# Can be same or different from sentiment LLM
-BrowserAgent_MaxSteps = 15
+BrowserAgent_LLMProvider = VertexAI
+; Can be same or different from sentiment LLM provider
+
+[VertexAI]
+ProjectID = kamikazekomodo
+Location = us-central1
+SentimentModelName = gemini-2.5-flash-preview-05-20
+BrowserAgentModelName = gemini-2.5-flash-preview-05-20
+; You might use a more powerful model for browser agent if needed, e.g., gemini-1.5-pro-preview-0514
+
+; RSS Feeds for NewsScraper (add as many as needed, use unique keys)
+RSSFeed_Coindesk = https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml
+RSSFeed_Cointelegraph = https://cointelegraph.com/rss
+RSSFeed_Decrypt = https://decrypt.co/feed/
+RSSFeed_BitcoinComNews = https://news.bitcoin.com/feed/
+RSSFeed_Bitcoinist = https://bitcoinist.com/feed/
+RSSFeed_UToday = https://u.today/feed/
+RSSFeed_CCNNews = https://www.ccn.com/news/crypto-news/feeds/
+RSSFeed_CryptoPotato = https://cryptopotato.com/feed/
+RSSFeed_CryptoSlate = https://cryptoslate.com/feed/
+RSSFeed_TheDefiant = https://thedefiant.io/feed/
+RSSFeed_ConsensysNews = https://consensys.io/category/news/feed/
+; Add other relevant feeds:
+; TheBlock: (User needs to find URL)
+; BeInCrypto: (User needs to find URL)
+; CCN Analysis: https://www.ccn.com/analysis/crypto-analysis/feeds/
+; Consensys All: https://consensys.io/feed/
+
+
+; --- LEGACY Ollama Settings (if ever needed for fallback, but primary is VertexAI) ---
+; [Ollama_Legacy]
+; BaseURL = http://localhost:11434
+; SentimentLLMModel = gemma3:12b
+; BrowserAgent_LLMModel = gemma3:12b
 </code>
 
-kamikaze_komodo/config/secrets.ini:
+kamikaze_komodo\config\secrets.ini:
 <code>
 ; kamikaze_komodo/config/secrets.ini
 ; This file should be in .gitignore and contain sensitive information.
@@ -1808,15 +1972,13 @@ User = db_user
 Password = db_password
 </code>
 
-kamikaze_komodo/config/settings.py:
+kamikaze_komodo\config\settings.py:
 <code>
 # kamikaze_komodo/config/settings.py
-# Updated to include Phase 3 and Phase 4 settings
-
 import configparser
 import os
 from kamikaze_komodo.app_logger import get_logger
-from typing import Dict, List, Optional, Any # Added Any for type hinting
+from typing import Dict, List, Optional, Any
 
 logger = get_logger(__name__)
 
@@ -1848,14 +2010,14 @@ class Config:
         self.log_file_path: str = self.config.get('General', 'LogFilePath', fallback='logs/kamikaze_komodo.log')
 
         # API Settings
-        self.exchange_id_to_use: str = self.config.get('API', 'ExchangeID', fallback='kraken')
+        self.exchange_id_to_use: str = self.config.get('API', 'ExchangeID', fallback='krakenfutures') # Changed default for clarity with PF_XBTUSD
         self.kraken_api_key: Optional[str] = self.secrets.get('KRAKEN_API', 'API_KEY', fallback=None)
         self.kraken_secret_key: Optional[str] = self.secrets.get('KRAKEN_API', 'SECRET_KEY', fallback=None)
         self.kraken_testnet: bool = self.config.getboolean('API', 'KrakenTestnet', fallback=True)
 
         # Data Fetching Settings
-        self.default_symbol: str = self.config.get('DataFetching', 'DefaultSymbol', fallback='BTC/USD')
-        self.default_timeframe: str = self.config.get('DataFetching', 'DefaultTimeframe', fallback='1h')
+        self.default_symbol: str = self.config.get('DataFetching', 'DefaultSymbol', fallback='PF_XBTUSD')
+        self.default_timeframe: str = self.config.get('DataFetching', 'DefaultTimeframe', fallback='4h') # Changed from 1h to match config
         self.historical_data_days: int = self.config.getint('DataFetching', 'HistoricalDataDays', fallback=365)
         self.data_fetch_limit_per_call: int = self.config.getint('DataFetching', 'DataFetchLimitPerCall', fallback=500)
 
@@ -1867,7 +2029,9 @@ class Config:
         # EWMAC Strategy Settings
         self.ewmac_short_window: int = self.config.getint('EWMAC_Strategy', 'ShortWindow', fallback=12)
         self.ewmac_long_window: int = self.config.getint('EWMAC_Strategy', 'LongWindow', fallback=26)
-        self.ewmac_signal_window: int = self.config.getint('EWMAC_Strategy', 'SignalWindow', fallback=9) # For MACD part of EWMAC if used
+        self.ewmac_signal_window: int = self.config.getint('EWMAC_Strategy', 'SignalWindow', fallback=9)
+        self.ewmac_atr_period: int = self.config.getint('EWMAC_Strategy', 'atr_period', fallback=14)
+
 
         # --- Phase 3: Risk Management Settings ---
         self.position_sizer_type: str = self.config.get('RiskManagement', 'PositionSizer', fallback='FixedFractional')
@@ -1878,44 +2042,65 @@ class Config:
         self.stop_manager_type: str = self.config.get('RiskManagement', 'StopManager_Default', fallback='PercentageBased')
         _sl_pct_str = self.config.get('RiskManagement', 'PercentageStop_LossPct', fallback='0.02')
         self.percentage_stop_loss_pct: Optional[float] = float(_sl_pct_str) if _sl_pct_str and _sl_pct_str.lower() not in ['none', '0', '0.0'] else None
-
         _tp_pct_str = self.config.get('RiskManagement', 'PercentageStop_TakeProfitPct', fallback='0.05')
         self.percentage_stop_take_profit_pct: Optional[float] = float(_tp_pct_str) if _tp_pct_str and _tp_pct_str.lower() not in ['none', '0', '0.0'] else None
-
         self.atr_stop_atr_multiple: float = self.config.getfloat('RiskManagement', 'ATRStop_ATRMultiple', fallback=2.0)
 
         # --- Phase 3: Portfolio Constructor Settings ---
         self.asset_allocator_type: str = self.config.get('PortfolioConstructor', 'AssetAllocator', fallback='FixedWeight')
-        self.default_allocation_btcusd: float = self.config.getfloat('PortfolioConstructor', f'DefaultAllocation_{self.default_symbol.replace("/","").replace(":","")}', fallback=1.0)
+        # Attempt to dynamically get the default allocation for the default symbol
+        default_symbol_config_key = f'DefaultAllocation_{self.default_symbol.replace("/", "").replace(":", "")}'
+        self.default_allocation_for_symbol: float = self.config.getfloat('PortfolioConstructor', default_symbol_config_key, fallback=1.0)
         self.rebalancer_deviation_threshold: float = self.config.getfloat('PortfolioConstructor', 'Rebalancer_DeviationThreshold', fallback=0.05)
 
         # --- Phase 4: AI News Analysis Settings ---
         self.enable_sentiment_analysis: bool = self.config.getboolean('AI_NewsAnalysis', 'EnableSentimentAnalysis', fallback=True)
-        self.sentiment_llm_model: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMModel', fallback='gemma:7b')
-        self.ollama_base_url: Optional[str] = self.config.get('AI_NewsAnalysis', 'OllamaBaseURL', fallback="http://localhost:11434")
-        if self.ollama_base_url and self.ollama_base_url.lower() in ['none', '']: self.ollama_base_url = None
+        self.sentiment_llm_provider: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMProvider', fallback='VertexAI')
+        self.browser_agent_llm_provider: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMProvider', fallback='VertexAI')
 
         self.sentiment_filter_threshold_long: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Long', fallback=0.1)
         self.sentiment_filter_threshold_short: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Short', fallback=-0.1)
         self.simulated_sentiment_data_path: Optional[str] = self.config.get('AI_NewsAnalysis', 'SimulatedSentimentDataPath', fallback=None)
         if self.simulated_sentiment_data_path and self.simulated_sentiment_data_path.lower() in ['none', '']: self.simulated_sentiment_data_path = None
-        # Resolve simulated sentiment data path relative to project module dir if it's a relative path
         if self.simulated_sentiment_data_path and not os.path.isabs(self.simulated_sentiment_data_path):
             self.simulated_sentiment_data_path = os.path.join(project_module_dir, self.simulated_sentiment_data_path)
 
-
         self.news_scraper_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'NewsScraper_Enable', fallback=True)
-        self.rss_feed_cointelegraph: str = self.config.get('AI_NewsAnalysis', 'RSSFeed_CoinTelegraph', fallback='https://cointelegraph.com/rss')
-        self.rss_feed_seeking_alpha: str = self.config.get('AI_NewsAnalysis', 'RSSFeed_SeekingAlpha', fallback='https://seekingalpha.com/market_currents.xml')
-
         self.notification_listener_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'NotificationListener_Enable', fallback=False)
         self.browser_agent_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'BrowserAgent_Enable', fallback=False)
-        self.browser_agent_llm_model: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMModel', fallback='gemma:7b')
-        self.browser_agent_max_steps: int = self.config.getint('AI_NewsAnalysis', 'BrowserAgent_MaxSteps', fallback=15)
+        
+        # VertexAI Settings
+        self.vertex_ai_project_id: Optional[str] = self.config.get('VertexAI', 'ProjectID', fallback=None)
+        self.vertex_ai_location: Optional[str] = self.config.get('VertexAI', 'Location', fallback=None)
+        self.vertex_ai_sentiment_model_name: str = self.config.get('VertexAI', 'SentimentModelName', fallback='gemini-2.5-flash-preview-05-20')
+        self.vertex_ai_browser_agent_model_name: str = self.config.get('VertexAI', 'BrowserAgentModelName', fallback='gemini-2.5-flash-preview-05-20')
+
+        if self.vertex_ai_project_id and self.vertex_ai_project_id.lower() == 'your-gcp-project-id':
+            logger.warning("Vertex AI ProjectID is set to 'your-gcp-project-id'. Please update it in config.ini.")
+            self.vertex_ai_project_id = None
+
+
+        # Legacy Ollama Settings (can be removed if not needed for fallback)
+        # self.ollama_base_url: Optional[str] = self.config.get('Ollama_Legacy', 'BaseURL', fallback="http://localhost:11434")
+        # if self.ollama_base_url and self.ollama_base_url.lower() in ['none', '']: self.ollama_base_url = None
+        # self.ollama_sentiment_llm_model: str = self.config.get('Ollama_Legacy', 'SentimentLLMModel', fallback='gemma3:12b')
+        # self.ollama_browser_agent_llm_model: str = self.config.get('Ollama_Legacy', 'BrowserAgent_LLMModel', fallback='gemma3:12b')
+
+
+        # RSS Feeds
+        self.rss_feeds: List[Dict[str, str]] = []
+        if self.config.has_section('AI_NewsAnalysis'):
+            for key, value in self.config.items('AI_NewsAnalysis'):
+                if key.startswith("rssfeed_"):
+                    feed_name = key.replace("rssfeed_", "").replace("_", " ").title()
+                    self.rss_feeds.append({"name": feed_name, "url": value})
+        if not self.rss_feeds:
+            logger.warning("No RSS feeds configured in config.ini under [AI_NewsAnalysis] with 'RSSFeed_' prefix.")
+
 
     def get_strategy_params(self, strategy_name: str) -> dict:
         params = {}
-        section_name = f"{strategy_name}_Strategy" # Standardize section names like EWMAC_Strategy
+        section_name = f"{strategy_name}_Strategy"
         if self.config.has_section(section_name):
             params = dict(self.config.items(section_name))
             for key, value in params.items():
@@ -1931,43 +2116,50 @@ class Config:
                         elif value.lower() == 'none': params[key] = None
         else:
             logger.warning(f"No specific configuration section found for strategy: {section_name}. Using defaults or globally passed params.")
+        
+        # Add relevant global AI settings to strategy params if not already present
+        # This allows strategies to easily access sentiment thresholds.
+        if 'sentiment_filter_long_threshold' not in params:
+            params['sentiment_filter_long_threshold'] = self.sentiment_filter_threshold_long
+        if 'sentiment_filter_short_threshold' not in params:
+            params['sentiment_filter_short_threshold'] = self.sentiment_filter_threshold_short
+        if 'atr_period' not in params and strategy_name == "EWMAC": # Specifically for EWMAC
+             params['atr_period'] = self.ewmac_atr_period
+
+
         return params
 
     def get_news_scraper_config(self) -> Dict[str, Any]:
-        cfg = {"rss_feeds": [], "websites": []}
-        if self.news_scraper_enable:
-            if self.rss_feed_cointelegraph:
-                cfg["rss_feeds"].append({"name": "CoinTelegraph RSS", "url": self.rss_feed_cointelegraph})
-            if self.rss_feed_seeking_alpha:
-                cfg["rss_feeds"].append({"name": "SeekingAlpha Market Currents", "url": self.rss_feed_seeking_alpha})
-            # Example to read additional websites if configured in a more generic way in config.ini
-            for key, value in self.config.items('AI_NewsAnalysis'):
-                if key.startswith("websitescrape_") and key.endswith("_url"):
-                    site_id = key.replace("websitescrape_", "").replace("_url", "")
-                    site_name = self.config.get('AI_NewsAnalysis', f'WebsiteScrape_{site_id}_Name', fallback=site_id.capitalize())
-                    cfg["websites"].append({"name": site_name, "url": value})
+        cfg = {"rss_feeds": self.rss_feeds, "websites": []} # Websites can be added similarly if needed
+        # Example for websites:
+        # if self.config.has_section('AI_NewsAnalysis'):
+        # for key, value in self.config.items('AI_NewsAnalysis'):
+        # if key.startswith("websitescrape_") and key.endswith("_url"):
+        # site_id = key.replace("websitescrape_", "").replace("_url", "")
+        # site_name = self.config.get('AI_NewsAnalysis', f'WebsiteScrape_{site_id}_Name', fallback=site_id.capitalize())
+        # cfg["websites"].append({"name": site_name, "url": value})
         return cfg
 
 try:
-    settings = Config(config_file_rel_path='config/config.ini', secrets_file_rel_path='config/secrets.ini')
+    settings = Config()
 except FileNotFoundError as e:
     logger.critical(f"Could not initialize settings due to missing configuration file: {e}")
-    settings = None
+    settings = None # type: ignore
 except Exception as e_global:
     logger.critical(f"Failed to initialize Config object: {e_global}", exc_info=True)
-    settings = None
+    settings = None # type: ignore
 
-if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()): # Updated placeholder check
-    logger.warning(f"API Key for '{settings.exchange_id_to_use}' appears to be a placeholder or is not configured in secrets.ini. Authenticated interaction will be limited.")
+if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()):
+    logger.warning(f"API Key for '{settings.exchange_id_to_use}' appears to be a placeholder or is not configured in secrets.ini. Authenticated interaction will be limited/simulated.")
 </code>
 
-kamikaze_komodo/config/__init__.py:
+kamikaze_komodo\config\__init__.py:
 <code>
 # kamikaze_komodo/config/__init__.py
 # This file makes the 'config' directory a Python package.
 </code>
 
-kamikaze_komodo/core/enums.py:
+kamikaze_komodo\core\enums.py:
 <code>
 # kamikaze_komodo/core/enums.py
 from enum import Enum
@@ -2030,7 +2222,7 @@ class TradeResult(Enum):
     BREAKEVEN = "BREAKEVEN"
 </code>
 
-kamikaze_komodo/core/models.py:
+kamikaze_komodo\core\models.py:
 <code>
 # kamikaze_komodo/core/models.py
 # Added fields to NewsArticle and Trade as potentially needed by new modules.
@@ -2143,7 +2335,7 @@ class PortfolioSnapshot(BaseModel):
     open_pnl_usd: float = Field(0.0, description="Total open Profit/Loss in USD for current positions")
 </code>
 
-kamikaze_komodo/core/utils.py:
+kamikaze_komodo\core\utils.py:
 <code>
 # kamikaze_komodo/core/utils.py
 from datetime import datetime, timezone
@@ -2193,13 +2385,13 @@ def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> BarData:
 # - etc.
 </code>
 
-kamikaze_komodo/core/__init__.py:
+kamikaze_komodo\core\__init__.py:
 <code>
 # kamikaze_komodo/core/__init__.py
 # This file makes the 'core' directory a Python package.
 </code>
 
-kamikaze_komodo/data_handling/database_manager.py:
+kamikaze_komodo\data_handling\database_manager.py:
 <code>
 # kamikaze_komodo/data_handling/database_manager.py
 # Updated to include store/retrieve for NewsArticle
@@ -2438,7 +2630,7 @@ class DatabaseManager:
     def __del__(self): self.close()
 </code>
 
-kamikaze_komodo/data_handling/data_fetcher.py:
+kamikaze_komodo\data_handling\data_fetcher.py:
 <code>
 # kamikaze_komodo/data_handling/data_fetcher.py
 import ccxt.async_support as ccxt # Use async version for future compatibility
@@ -2667,13 +2859,13 @@ if __name__ == '__main__':
     pass
 </code>
 
-kamikaze_komodo/data_handling/__init__.py:
+kamikaze_komodo\data_handling\__init__.py:
 <code>
 # kamikaze_komodo/data_handling/__init__.py
 # This file makes the 'data_handling' directory a Python package.
 </code>
 
-kamikaze_komodo/exchange_interaction/exchange_api.py:
+kamikaze_komodo\exchange_interaction\exchange_api.py:
 <code>
 # kamikaze_komodo/exchange_interaction/exchange_api.py
 import ccxt.async_support as ccxt
@@ -2947,13 +3139,13 @@ async def main_exchange_api_example():
 #     asyncio.run(main_exchange_api_example())
 </code>
 
-kamikaze_komodo/exchange_interaction/__init__.py:
+kamikaze_komodo\exchange_interaction\__init__.py:
 <code>
 # kamikaze_komodo/exchange_interaction/__init__.py
 # This file makes the 'exchange_interaction' directory a Python package.
 </code>
 
-kamikaze_komodo/portfolio_constructor/asset_allocator.py:
+kamikaze_komodo\portfolio_constructor\asset_allocator.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/asset_allocator.py
 from abc import ABC, abstractmethod
@@ -3046,7 +3238,7 @@ class FixedWeightAssetAllocator(BaseAssetAllocator):
 # class HRPAllocator(BaseAssetAllocator): ...
 </code>
 
-kamikaze_komodo/portfolio_constructor/rebalancer.py:
+kamikaze_komodo\portfolio_constructor\rebalancer.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/rebalancer.py
 from abc import ABC, abstractmethod
@@ -3172,14 +3364,14 @@ class BasicRebalancer(BaseRebalancer):
         return orders
 </code>
 
-kamikaze_komodo/portfolio_constructor/__init__.py:
+kamikaze_komodo\portfolio_constructor\__init__.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/__init__.py
 # This file makes the 'portfolio_constructor' directory a Python package.
 logger_name = "KamikazeKomodo.portfolio_constructor" # Satisfy linter if file is empty
 </code>
 
-kamikaze_komodo/risk_control_module/position_sizer.py:
+kamikaze_komodo\risk_control_module\position_sizer.py:
 <code>
 # kamikaze_komodo/risk_control_module/position_sizer.py
 from abc import ABC, abstractmethod
@@ -3351,7 +3543,7 @@ class ATRBasedPositionSizer(BasePositionSizer):
         return position_size
 </code>
 
-kamikaze_komodo/risk_control_module/stop_manager.py:
+kamikaze_komodo\risk_control_module\stop_manager.py:
 <code>
 # kamikaze_komodo/risk_control_module/stop_manager.py
 from abc import ABC, abstractmethod
@@ -3512,14 +3704,14 @@ class ATRStopManager(BaseStopManager):
         return None
 </code>
 
-kamikaze_komodo/risk_control_module/__init__.py:
+kamikaze_komodo\risk_control_module\__init__.py:
 <code>
 # kamikaze_komodo/risk_control_module/__init__.py
 # This file makes the 'risk_control_module' directory a Python package.
 logger_name = "KamikazeKomodo.risk_control_module" # Satisfy linter
 </code>
 
-kamikaze_komodo/strategy_framework/base_strategy.py:
+kamikaze_komodo\strategy_framework\base_strategy.py:
 <code>
 # kamikaze_komodo/strategy_framework/base_strategy.py
 # Updated to include optional sentiment_score in on_bar_data
@@ -3622,7 +3814,7 @@ class BaseStrategy(ABC):
         return self.__class__.__name__
 </code>
 
-kamikaze_komodo/strategy_framework/strategy_manager.py:
+kamikaze_komodo\strategy_framework\strategy_manager.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategy_manager.py
 from typing import List, Dict, Any
@@ -3737,13 +3929,13 @@ if __name__ == '__main__':
         logger.error("Settings not loaded, cannot run StrategyManager example.")
 </code>
 
-kamikaze_komodo/strategy_framework/__init__.py:
+kamikaze_komodo\strategy_framework\__init__.py:
 <code>
 # kamikaze_komodo/strategy_framework/__init__.py
 # This file makes the 'strategy_framework' directory a Python package.
 </code>
 
-kamikaze_komodo/strategy_framework/strategies/ewmac.py:
+kamikaze_komodo\strategy_framework\strategies\ewmac.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/ewmac.py
 import pandas as pd
@@ -3926,186 +4118,9 @@ class EWMACStrategy(BaseStrategy):
         return signal_to_return
 </code>
 
-kamikaze_komodo/strategy_framework/strategies/__init__.py:
+kamikaze_komodo\strategy_framework\strategies\__init__.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/__init__.py
 # This file makes the 'strategies' directory a Python package.
-</code>
-
-kamikaze_komodo/testing/testBrowserUse.py:
-<code>
-import asyncio
-from dotenv import load_dotenv
-from browser_use import Agent
-from langchain_ollama import ChatOllama
-
-# Load environment variables (optional for local Ollama, but good practice)
-load_dotenv()
-
-async def research_bitcoin_sentiment():
-    """
-    Uses browser-use with Ollama (gemma3:12b) to research
-    market sentiment and news about Bitcoin.
-    """
-    print("Initializing Ollama LLM (gemma3:12b)...")
-    try:
-        # Initialize the Ollama LLM
-        # You can adjust num_ctx (context window size) if needed.
-        # Larger values allow for more context but consume more resources.
-        llm = ChatOllama(model="gemma3:12b", num_ctx=128000) # gemma3 models often have 8k context
-        print("Ollama LLM initialized.")
-    except Exception as e:
-        print(f"Error initializing Ollama LLM: {e}")
-        print("Please ensure Ollama is running and the model 'gemma3:12b' is pulled.")
-        return
-
-    # Define the research task
-    task = (
-        "Research the current market sentiment surrounding Bitcoin. "
-        "Find 2-3 recent news articles (from the last week if possible) that discuss Bitcoin's price, adoption, or regulatory news. "
-        "Summarize the overall sentiment (e.g., bullish, bearish, neutral) and list the headlines and sources of the news articles found. "
-        "Focus on reputable financial news sources or crypto-specific news sites."
-        "Do not visit coindesk and do not stay on a website for more than 4 steps"
-    )
-
-    print(f"\nStarting browser-use agent with task: '{task}'")
-    print("This might take a few minutes depending on the complexity and web page loading times...")
-
-    try:
-        # Create the browser-use Agent
-        # use_vision=False is a good default if the model doesn't explicitly support it well
-        # or if the task doesn't require image understanding.
-        # For gemma3:12b, it's primarily text-based.
-        agent = Agent(
-            llm=llm,
-            task=task,
-            use_vision=False,
-            # verbose=True, # For more detailed logging from browser-use
-        )
-
-        # Run the agent
-        result = await agent.run(max_steps=50) 
-
-        print("\n--- Research Complete ---")
-        if isinstance(result, str):
-            print(result)
-        elif isinstance(result, dict) and 'output' in result:
-            print(result['output'])
-        else:
-            print("Result from agent:")
-            print(result)
-
-    except Exception as e:
-        print(f"\nAn error occurred while running the browser-use agent: {e}")
-        print("Possible issues:")
-        print("- Ollama server not responding or model not loaded correctly.")
-        print("- Network connectivity problems for the browser.")
-        print("- The task might be too complex or the websites visited might be problematic for automation.")
-
-if __name__ == "__main__":
-    # Check if Ollama is running and model is available (basic check)
-    try:
-        print("Checking Ollama status and model availability...")
-        ollama_client_check = ChatOllama(model="gemma3:12b")
-        ollama_client_check.invoke("Hello") # Simple test invocation
-        print("Ollama and gemma3:12b seem to be accessible.")
-        del ollama_client_check
-    except Exception as e:
-        print(f"Pre-check failed: Could not connect to Ollama or load gemma3:12b: {e}")
-        print("Please ensure Ollama is running and you have pulled 'gemma3:12b' (ollama pull gemma3:12b).")
-        exit(1)
-
-    asyncio.run(research_bitcoin_sentiment())
-</code>
-
-kamikaze_komodo/testing/testOllama.py:
-<code>
-import ollama
-
-def chat_with_ollama():
-    """
-    Allows the user to interact with a specified Ollama model.
-    """
-    # --- Configuration ---
-    # You can change the model_name to any model you have available in Ollama.
-    # Run 'ollama list' in your terminal to see available models.
-    model_name = 'gemma3:12b' # Example: replace if needed
-
-    print(f"Starting chat with Ollama model: {model_name}")
-    print("Type 'quit', 'exit', or 'bye' to end the chat.")
-    print("-" * 30)
-
-    # --- Initialize conversation history ---
-    # Ollama's chat endpoint can maintain context if you pass the history.
-    messages = []
-
-    while True:
-        try:
-            user_input = input("You: ")
-            if user_input.lower() in ['quit', 'exit', 'bye']:
-                print("Exiting chat. Goodbye! 👋")
-                break
-
-            # Add user's message to history
-            messages.append({'role': 'user', 'content': user_input})
-
-            # --- Send prompt to Ollama and stream response ---
-            # stream=True provides a more interactive experience as tokens arrive.
-            # stream=False will wait for the full response.
-            response_stream = ollama.chat(
-                model=model_name,
-                messages=messages,
-                stream=True
-            )
-
-            print(f"AI ({model_name}): ", end="", flush=True)
-            assistant_response = ""
-            for chunk in response_stream:
-                if 'message' in chunk and 'content' in chunk['message']:
-                    token = chunk['message']['content']
-                    print(token, end="", flush=True)
-                    assistant_response += token
-                # Check for the 'done' status if not using stream=True,
-                # or to handle the end of a streamed response.
-                if chunk.get('done'):
-                    print() # Newline after the full response
-                    # Add assistant's full response to history
-                    messages.append({'role': 'assistant', 'content': assistant_response})
-                    break
-            
-            if not assistant_response: # If stream ended without content (e.g., error)
-                print("\nNo response from model or stream ended.")
-                # Optionally remove the last user message if there was no valid response
-                if messages and messages[-1]['role'] == 'user':
-                    messages.pop()
-
-
-        except Exception as e:
-            print(f"\nAn error occurred: {e}")
-            # You might want to clear messages or handle the error more gracefully
-            break
-
-if __name__ == '__main__':
-    # --- Check if Ollama is running and the model is available ---
-    try:
-        client = ollama.Client()
-        client.list() # Simple check to see if server is reachable
-        print("Successfully connected to Ollama.")
-        
-        # You can add a check here to see if model_name exists if desired,
-        # though ollama.chat will also error out if it doesn't.
-        
-    except Exception as e:
-        print(f"Error connecting to Ollama or Ollama server not running: {e}")
-        print("Please ensure the Ollama application is running.")
-        exit()
-        
-    chat_with_ollama()
-</code>
-
-kamikaze_komodo/testing/__init__.py:
-<code>
-# kamikaze_komodo/testing/__init__.py
-# This file makes the 'testing' directory a Python package.
 </code>
 
