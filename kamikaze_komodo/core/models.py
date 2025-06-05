@@ -1,5 +1,6 @@
 # kamikaze_komodo/core/models.py
 # Added fields to NewsArticle and Trade as potentially needed by new modules.
+# Added prediction_value and prediction_confidence to BarData for Phase 5 ML strategy.
 from typing import Optional, List, Dict, Any # Added Any
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
@@ -19,20 +20,19 @@ class BarData(BaseModel):
     volume: float = Field(..., ge=0, description="Trading volume")
     symbol: Optional[str] = Field(None, description="Trading symbol, e.g., BTC/USD")
     timeframe: Optional[str] = Field(None, description="Candle timeframe, e.g., 1h")
+    
     # Optional fields for indicators or sentiment
     atr: Optional[float] = Field(None, description="Average True Range at this bar")
     sentiment_score: Optional[float] = Field(None, description="Sentiment score associated with this bar's timestamp")
+    
+    # Fields for ML predictions (Phase 5)
+    prediction_value: Optional[float] = Field(None, description="Predicted value by an ML model (e.g., future price, return)")
+    prediction_confidence: Optional[float] = Field(None, description="Confidence of the ML prediction (0.0 to 1.0)")
 
 
     class Config:
-        frozen = False # Changed to False to allow adding attributes like ATR dynamically if needed
-                       # Or use `model_copy(update={...})` for immutable updates.
-                       # For backtesting.py compatibility, mutable might be easier.
-                       # Let's keep it True and see if backtesting.py / strategies handle it.
-                       # If strategies create copies and add indicators, it's fine.
-                       # For `BarData.sentiment_score` to be added by engine, it needs to be mutable or recreated.
-                       # For now, making it mutable for easier integration.
-        # frozen = True 
+        frozen = False # Allow modification by strategies/engine (e.g. to add ATR or predictions)
+        
 
 class Order(BaseModel):
     # ... (no changes from existing)

@@ -8,7 +8,7 @@ logger = get_logger(__name__)
 
 class BrowserAgent:
     """
-    Uses browser-use with a configured LLM (e.g., Vertex AI's Gemini)
+    Uses browser-use with a configured LLM (Vertex AI's Gemini)
     to perform targeted market research.
     """
     def __init__(self):
@@ -19,19 +19,21 @@ class BrowserAgent:
         self.llm_provider = settings.browser_agent_llm_provider
         self.llm: Optional[Any] = None # To be initialized
         self.agent_is_ready = False
+        self.browser_use_agent_class: Optional[type] = None # For storing the imported class
 
         try:
             self._initialize_llm()
             # Dynamically import browser_use only if LLM init is successful
-            global BrowserUseAgent # Make it global for the method if loaded
-            from browser_use import Agent as BrowserUseAgent
+            # global BrowserUseAgent # Make it global for the method if loaded
+            from browser_use import Agent as BrowserUseAgentLib
+            self.browser_use_agent_class = BrowserUseAgentLib # Store the class
             self.agent_is_ready = True
             logger.info("browser-use Agent component dynamically imported.")
         except ImportError:
             logger.error("browser-use library not found. Please install it: pip install browser-use")
             logger.error("Also run: playwright install --with-deps chromium")
         except Exception as e:
-            logger.error(f"BrowserAgent initialization failed: {e}")
+            logger.error(f"BrowserAgent initialization failed: {e}", exc_info=True)
 
 
     def _initialize_llm(self):
@@ -57,7 +59,6 @@ class BrowserAgent:
             except Exception as e:
                 logger.error(f"Failed to initialize Vertex AI LLM for BrowserAgent: {e}", exc_info=True)
                 raise
-
         else:
             logger.error(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
             raise ValueError(f"Unsupported LLM provider for BrowserAgent: {self.llm_provider}")
@@ -70,17 +71,17 @@ class BrowserAgent:
         """
         Conducts research based on the given task using browser-use.
         """
-        if not self.agent_is_ready or self.llm is None:
-            logger.error("BrowserAgent or its LLM not initialized. Cannot conduct research.")
+        if not self.agent_is_ready or self.llm is None or self.browser_use_agent_class is None:
+            logger.error("BrowserAgent or its LLM not initialized, or browser_use class not loaded. Cannot conduct research.")
             return None
 
         logger.info(f"Starting browser-use research task: '{research_task[:100]}...' (Max steps: {max_steps})")
         try:
-            agent = BrowserUseAgent( # This is the dynamically imported class
+            agent = self.browser_use_agent_class( # Use the stored class
                 llm=self.llm,
                 task=research_task,
                 use_vision=use_vision,
-                # verbose=True,
+                # verbose=True, # Can be noisy
             )
             result = await agent.run(max_steps=max_steps)
             logger.info("Browser-use research task completed.")
@@ -108,7 +109,7 @@ async def main_browser_agent_example():
         logger.info("BrowserAgent is not enabled in settings or settings not loaded.")
         return
     if not settings.vertex_ai_project_id and settings.browser_agent_llm_provider == "VertexAI":
-        logger.error("Vertex AI Project ID not set for BrowserAgent. Set GOOGLE_APPLICATION_CREDENTIALS.")
+        logger.error("Vertex AI Project ID not set for BrowserAgent. Ensure it's in config.ini and GOOGLE_APPLICATION_CREDENTIALS env var is set.")
         return
 
     try:
@@ -121,11 +122,14 @@ async def main_browser_agent_example():
         return
 
     task = (
-        "What is the latest news regarding Ethereum's price action and upcoming upgrades in June 2025? "
-        "Visit 2 reputable crypto news websites (e.g., Decrypt, Cointelegraph, but NOT CoinDesk). "
+        "What is the latest news regarding Solana's network performance and any major ecosystem developments in June 2025? "
+        "Visit 2 reputable crypto news websites (e.g., Decrypt, Cointelegraph). "
         "Summarize findings and list article URLs. Limit Browse to 4 steps per site."
     )
-    result_data = await browser_agent.conduct_research(task, max_steps=settings.browser_agent_max_steps or 25)
+    # Get max_steps from settings
+    max_steps_for_research = settings.browser_agent_max_steps if settings.browser_agent_max_steps > 0 else 25
+
+    result_data = await browser_agent.conduct_research(task, max_steps=max_steps_for_research)
 
     if result_data and "output" in result_data:
         logger.info("\n--- Browser Agent Research Result ---")

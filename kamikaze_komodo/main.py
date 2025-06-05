@@ -31,6 +31,12 @@ from kamikaze_komodo.ai_news_analysis_agent_module.sentiment_analyzer import Sen
 # from kamikaze_komodo.ai_news_analysis_agent_module.browser_agent import BrowserAgent # Optional advanced feature
 # from kamikaze_komodo.ai_news_analysis_agent_module.notification_listener import NotificationListener, dummy_notification_callback # Placeholder
 
+# Phase 5 imports
+from kamikaze_komodo.strategy_framework.strategies.ehlers_instantaneous_trendline import EhlersInstantaneousTrendlineStrategy
+from kamikaze_komodo.strategy_framework.strategies.ml_forecaster_strategy import MLForecasterStrategy
+from kamikaze_komodo.ml_models.training_pipelines.lightgbm_pipeline import LightGBMTrainingPipeline # For training demo
+# from kamikaze_komodo.ml_models.inference_pipelines.lightgbm_inference import LightGBMInference # Used by MLForecasterStrategy internally
+
 logger = get_logger(__name__)
 
 async def run_phase1_demonstration():
@@ -82,7 +88,7 @@ async def run_phase2_demonstration():
     start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    ewmac_params_for_min_bars = settings.get_strategy_params("EWMAC")
+    ewmac_params_for_min_bars = settings.get_strategy_params("EWMAC_Strategy")
     min_bars_needed = int(ewmac_params_for_min_bars.get('longwindow', settings.ewmac_long_window)) + 5 # Buffer
 
     historical_bars: List[BarData] = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
@@ -107,7 +113,7 @@ async def run_phase2_demonstration():
     if data_df.empty or len(data_df) < min_bars_needed:
         logger.error(f"DataFrame conversion error or insufficient points for EWMAC ({len(data_df)})."); return
 
-    ewmac_params = settings.get_strategy_params("EWMAC") # Gets params from [EWMAC_Strategy] in config
+    ewmac_params = settings.get_strategy_params("EWMAC_Strategy") 
     ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
     
     initial_capital = 10000.00
@@ -139,12 +145,10 @@ async def run_phase3_demonstration():
     start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    ewmac_params_for_min_bars_phase3 = settings.get_strategy_params("EWMAC")
-    # For ATR-based risk, strategy needs enough data to calculate ATR.
-    # ATR period is now part of strategy params from get_strategy_params.
+    ewmac_params_for_min_bars_phase3 = settings.get_strategy_params("EWMAC_Strategy")
     atr_period_from_params = int(ewmac_params_for_min_bars_phase3.get("atr_period", settings.ewmac_atr_period))
     long_window_from_params = int(ewmac_params_for_min_bars_phase3.get("longwindow", settings.ewmac_long_window))
-    min_bars_needed = max(long_window_from_params, atr_period_from_params) + 5 # Buffer
+    min_bars_needed = max(long_window_from_params, atr_period_from_params) + 5 
 
     historical_bars = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
     if not historical_bars or len(historical_bars) < min_bars_needed:
@@ -163,8 +167,7 @@ async def run_phase3_demonstration():
     data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
     data_df.set_index('timestamp', inplace=True)
     
-    # Strategy will calculate ATR internally if 'atr_period' is in its params
-    ewmac_params = settings.get_strategy_params("EWMAC")
+    ewmac_params = settings.get_strategy_params("EWMAC_Strategy")
     ewmac_strategy = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params)
 
     position_sizer: Optional[Any] = None
@@ -173,14 +176,14 @@ async def run_phase3_demonstration():
             risk_per_trade_fraction=settings.atr_based_risk_per_trade_fraction,
             atr_multiple_for_stop=settings.atr_based_atr_multiple_for_stop
         )
-    else: # Default to FixedFractional
+    else: 
         position_sizer = FixedFractionalPositionSizer(fraction=settings.fixed_fractional_allocation_fraction)
     logger.info(f"Using Position Sizer: {position_sizer.__class__.__name__}")
 
     stop_manager: Optional[Any] = None
     if settings.stop_manager_type.lower() == 'atrbased':
         stop_manager = ATRStopManager(atr_multiple=settings.atr_stop_atr_multiple)
-    else: # Default to PercentageBased
+    else: 
         stop_manager = PercentageStopManager(
             stop_loss_pct=settings.percentage_stop_loss_pct,
             take_profit_pct=settings.percentage_stop_take_profit_pct
@@ -214,30 +217,26 @@ async def run_phase4_demonstration():
     root_logger.info("Starting Kamikaze Komodo - Phase 4: AI News & Sentiment Integration")
     if not settings: root_logger.critical("Settings failed to load."); return
 
-    # 1. News Scraping (Optional live scrape for demo, or assume pre-populated DB)
     if settings.news_scraper_enable:
         logger.info("--- Running News Scraper (Phase 4 Demo) ---")
         try:
-            news_scraper = NewsScraper() # Configured from settings
-            # Scrape recent articles, e.g., last 48 hours for RSS, limit per source
+            news_scraper = NewsScraper() 
             scraped_articles = await news_scraper.scrape_all(limit_per_source=5, since_hours_rss=48)
             if scraped_articles:
                 logger.info(f"Scraped {len(scraped_articles)} unique articles.")
                 
-                # 2. Sentiment Analysis (Optional live analysis for demo)
                 if settings.enable_sentiment_analysis and settings.sentiment_llm_provider == "VertexAI" and settings.vertex_ai_project_id:
                     logger.info("--- Running Sentiment Analyzer on Scraped Articles (Phase 4 Demo) ---")
                     try:
-                        sentiment_analyzer = SentimentAnalyzer() # Configured from settings
+                        sentiment_analyzer = SentimentAnalyzer() 
                         analyzed_articles: List[NewsArticle] = []
-                        for article_to_analyze in scraped_articles[:5]: # Analyze first 5 for demo speed
+                        for article_to_analyze in scraped_articles[:5]: 
                             logger.info(f"Analyzing sentiment for: {article_to_analyze.title[:50]}...")
                             updated_article = await sentiment_analyzer.get_sentiment_for_article(article_to_analyze)
                             analyzed_articles.append(updated_article)
                             if updated_article.sentiment_label:
                                 logger.info(f"  -> Sentiment: {updated_article.sentiment_label} ({updated_article.sentiment_score:.2f})")
                         
-                        # Store analyzed articles (including sentiment) in DB
                         if analyzed_articles:
                             db_manager_news = DatabaseManager()
                             db_manager_news.store_news_articles(analyzed_articles)
@@ -257,17 +256,16 @@ async def run_phase4_demonstration():
         logger.info("News Scraper is disabled in settings. Skipping live scraping/analysis for Phase 4 demo.")
 
 
-    # 3. Backtesting with Simulated Sentiment Data (Primary focus of Phase 4 completion)
     logger.info("--- Proceeding to backtest with sentiment integration using simulated data ---")
     db_manager_bt = DatabaseManager()
     data_fetcher_bt = DataFetcher()
     symbol = settings.default_symbol
     timeframe = settings.default_timeframe
-    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 90 # Shorter for faster demo if needed
+    hist_days = settings.historical_data_days if settings.historical_data_days > 0 else 90 
     start_date_bt = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date_bt = datetime.now(timezone.utc)
 
-    ewmac_params_phase4 = settings.get_strategy_params("EWMAC")
+    ewmac_params_phase4 = settings.get_strategy_params("EWMAC_Strategy")
     atr_period_phase4 = int(ewmac_params_phase4.get("atr_period", settings.ewmac_atr_period))
     long_window_phase4 = int(ewmac_params_phase4.get("longwindow", settings.ewmac_long_window))
     min_bars_needed_phase4 = max(long_window_phase4, atr_period_phase4) + 5
@@ -289,7 +287,6 @@ async def run_phase4_demonstration():
     data_df_bt['timestamp'] = pd.to_datetime(data_df_bt['timestamp'])
     data_df_bt.set_index('timestamp', inplace=True)
 
-    # Load Simulated Sentiment Data
     sentiment_df: Optional[pd.DataFrame] = None
     if settings.simulated_sentiment_data_path and settings.enable_sentiment_analysis:
         sentiment_csv_path = settings.simulated_sentiment_data_path
@@ -312,7 +309,7 @@ async def run_phase4_demonstration():
             logger.warning(f"Simulated sentiment data file NOT FOUND at: {sentiment_csv_path}. Proceeding without external sentiment.")
     elif not settings.enable_sentiment_analysis:
         logger.info("Sentiment analysis is disabled in settings. Backtest will not use external sentiment data.")
-    else: # Path not provided
+    else: 
         logger.info("No simulated sentiment data path provided. Proceeding without external sentiment.")
 
     ewmac_strategy_sentiment = EWMACStrategy(symbol=symbol, timeframe=timeframe, params=ewmac_params_phase4)
@@ -339,7 +336,7 @@ async def run_phase4_demonstration():
         commission_bps=commission_bps,
         position_sizer=position_sizer_sent,
         stop_manager=stop_manager_sent,
-        sentiment_data_df=sentiment_df # Pass loaded sentiment data
+        sentiment_data_df=sentiment_df 
     )
     logger.info(f"Running Phase 4 backtest (EWMAC with Sentiment & Risk Mgmt) on {symbol}...")
     trades_log, final_portfolio = backtest_engine_sentiment.run()
@@ -354,6 +351,177 @@ async def run_phase4_demonstration():
     root_logger.info("Phase 4 Demonstration completed.")
 
 
+async def run_phase5_demonstration():
+    root_logger.info("Starting Kamikaze Komodo - Phase 5: Advanced Strategies & ML Models")
+    if not settings: root_logger.critical("Settings failed to load."); return
+
+    # --- 1. Optional: Train ML Model (LightGBM Example) ---
+    run_ml_training = True # Set to True to run training as part of demo. Ensures model is available.
+    if run_ml_training:
+        if not settings.config.has_section("LightGBM_Forecaster"):
+            logger.error("Config section [LightGBM_Forecaster] not found. Skipping ML model training.")
+        else:
+            logger.info("--- Running LightGBM Training Pipeline (Phase 5 Demo) ---")
+            try:
+                training_pipeline = LightGBMTrainingPipeline(
+                    symbol=settings.default_symbol, 
+                    timeframe=settings.default_timeframe
+                )
+                await training_pipeline.run_training()
+                logger.info("LightGBM Training Pipeline completed for Phase 5 demo.")
+            except Exception as e_train:
+                logger.error(f"Error during LightGBM training demo: {e_train}", exc_info=True)
+    else:
+        logger.info("Skipping ML model training for this Phase 5 demonstration run. Ensure model exists if MLForecasterStrategy is used.")
+
+    # --- 2. Backtest with Ehlers Instantaneous Trendline Strategy ---
+    logger.info("--- Starting Backtest with Ehlers Instantaneous Trendline Strategy (Phase 5 Demo) ---")
+    db_manager_ehlers = DatabaseManager()
+    data_fetcher_ehlers = DataFetcher()
+    symbol_ehlers = settings.default_symbol
+    timeframe_ehlers = settings.default_timeframe
+    hist_days_ehlers = settings.historical_data_days if settings.historical_data_days > 0 else 180 # Shorter for demo
+    start_date_ehlers = datetime.now(timezone.utc) - timedelta(days=hist_days_ehlers)
+    end_date_ehlers = datetime.now(timezone.utc)
+
+    ehlers_params = settings.get_strategy_params("EhlersInstantaneousTrendline_Strategy")
+    min_bars_needed_ehlers = int(ehlers_params.get("it_lag_trigger", 1)) + int(ehlers_params.get("atr_period", 14)) + 20 # Increased buffer
+
+    historical_bars_ehlers = db_manager_ehlers.retrieve_bar_data(symbol_ehlers, timeframe_ehlers, start_date_ehlers, end_date_ehlers)
+    if not historical_bars_ehlers or len(historical_bars_ehlers) < min_bars_needed_ehlers:
+        logger.info(f"Fetching data for Ehlers IT backtest (need ~{min_bars_needed_ehlers} bars)...")
+        historical_bars_ehlers = await data_fetcher_ehlers.fetch_historical_data_for_period(symbol_ehlers, timeframe_ehlers, start_date_ehlers, end_date_ehlers)
+        if historical_bars_ehlers: db_manager_ehlers.store_bar_data(historical_bars_ehlers)
+    
+    await data_fetcher_ehlers.close()
+    db_manager_ehlers.close()
+
+    if not historical_bars_ehlers or len(historical_bars_ehlers) < min_bars_needed_ehlers:
+        logger.error(f"Not enough data for Ehlers IT backtest ({len(historical_bars_ehlers)} bars). Aborting."); return
+
+    data_df_ehlers = pd.DataFrame([bar.model_dump() for bar in historical_bars_ehlers])
+    data_df_ehlers['timestamp'] = pd.to_datetime(data_df_ehlers['timestamp'])
+    data_df_ehlers.set_index('timestamp', inplace=True)
+
+    ehlers_strategy = EhlersInstantaneousTrendlineStrategy(symbol=symbol_ehlers, timeframe=timeframe_ehlers, params=ehlers_params)
+    
+    position_sizer_ehlers: Optional[Any] = None
+    if settings.position_sizer_type.lower() == 'atrbased':
+        position_sizer_ehlers = ATRBasedPositionSizer(settings.atr_based_risk_per_trade_fraction, settings.atr_based_atr_multiple_for_stop)
+    else: position_sizer_ehlers = FixedFractionalPositionSizer(settings.fixed_fractional_allocation_fraction)
+
+    stop_manager_ehlers: Optional[Any] = None
+    if settings.stop_manager_type.lower() == 'atrbased':
+        stop_manager_ehlers = ATRStopManager(settings.atr_stop_atr_multiple)
+    else: stop_manager_ehlers = PercentageStopManager(settings.percentage_stop_loss_pct, settings.percentage_stop_take_profit_pct)
+
+    initial_capital = 10000.00
+    commission_bps = settings.commission_bps
+
+    backtest_engine_ehlers = BacktestingEngine(
+        data_feed_df=data_df_ehlers, strategy=ehlers_strategy, initial_capital=initial_capital,
+        commission_bps=commission_bps, position_sizer=position_sizer_ehlers, stop_manager=stop_manager_ehlers
+    )
+    logger.info(f"Running Phase 5 backtest (Ehlers IT Strategy) on {symbol_ehlers}...")
+    trades_log_ehlers, final_portfolio_ehlers = backtest_engine_ehlers.run()
+
+    if trades_log_ehlers:
+        logger.info(f"Ehlers IT Backtest completed. Generated {len(trades_log_ehlers)} trades.")
+        pa_ehlers = PerformanceAnalyzer(trades_log_ehlers, initial_capital, final_portfolio_ehlers['final_portfolio_value'])
+        metrics_ehlers = pa_ehlers.calculate_metrics()
+        pa_ehlers.print_summary(metrics_ehlers)
+    else:
+        logger.info(f"Ehlers IT Backtest completed. No trades executed. Final portfolio: ${final_portfolio_ehlers['final_portfolio_value']:.2f}")
+
+
+    # --- 3. Backtest with MLForecasterStrategy ---
+    logger.info("--- Starting Backtest with MLForecasterStrategy (Phase 5 Demo) ---")
+    
+    db_manager_ml = DatabaseManager()
+    data_fetcher_ml = DataFetcher()
+    symbol_ml = settings.default_symbol
+    timeframe_ml = settings.default_timeframe
+    hist_days_ml = settings.historical_data_days if settings.historical_data_days > 0 else 180 
+    start_date_ml = datetime.now(timezone.utc) - timedelta(days=hist_days_ml)
+    end_date_ml = datetime.now(timezone.utc)
+
+    ml_strategy_params = settings.get_strategy_params("MLForecaster_Strategy")
+    min_bars_for_pred = int(ml_strategy_params.get('min_bars_for_prediction', 50))
+    min_bars_needed_ml = max(min_bars_for_pred, int(ml_strategy_params.get("atr_period", 14))) + 20 # Increased buffer
+
+    historical_bars_ml = db_manager_ml.retrieve_bar_data(symbol_ml, timeframe_ml, start_date_ml, end_date_ml)
+    if not historical_bars_ml or len(historical_bars_ml) < min_bars_needed_ml:
+        logger.info(f"Fetching data for ML Strategy backtest (need ~{min_bars_needed_ml} bars)...")
+        historical_bars_ml = await data_fetcher_ml.fetch_historical_data_for_period(symbol_ml, timeframe_ml, start_date_ml, end_date_ml)
+        if historical_bars_ml: db_manager_ml.store_bar_data(historical_bars_ml)
+    
+    await data_fetcher_ml.close()
+    db_manager_ml.close()
+
+    if not historical_bars_ml or len(historical_bars_ml) < min_bars_needed_ml:
+        logger.error(f"Not enough data for ML Strategy backtest ({len(historical_bars_ml)} bars). Aborting."); return
+    
+    data_df_ml = pd.DataFrame([bar.model_dump() for bar in historical_bars_ml])
+    data_df_ml['timestamp'] = pd.to_datetime(data_df_ml['timestamp'])
+    data_df_ml.set_index('timestamp', inplace=True)
+
+    try:
+        ml_strategy = MLForecasterStrategy(symbol=symbol_ml, timeframe=timeframe_ml, params=ml_strategy_params)
+        if ml_strategy.inference_engine is None or ml_strategy.inference_engine.forecaster.model is None:
+             logger.error(f"MLForecasterStrategy for {symbol_ml} ({timeframe_ml}) failed to load its model. Cannot proceed with backtest.")
+             root_logger.info("Phase 5 MLForecasterStrategy Backtest SKIPPED due to model loading issue.")
+             return # Skip this part of the demo if model isn't loaded
+    except Exception as e_strat_init:
+        logger.error(f"Failed to initialize MLForecasterStrategy: {e_strat_init}", exc_info=True)
+        root_logger.info("Phase 5 MLForecasterStrategy Backtest SKIPPED due to strategy initialization error.")
+        return
+
+    position_sizer_ml: Optional[Any] = None 
+    if settings.position_sizer_type.lower() == 'atrbased':
+        position_sizer_ml = ATRBasedPositionSizer(settings.atr_based_risk_per_trade_fraction, settings.atr_based_atr_multiple_for_stop)
+    else: position_sizer_ml = FixedFractionalPositionSizer(settings.fixed_fractional_allocation_fraction)
+
+    stop_manager_ml: Optional[Any] = None
+    if settings.stop_manager_type.lower() == 'atrbased':
+        stop_manager_ml = ATRStopManager(settings.atr_stop_atr_multiple)
+    else: stop_manager_ml = PercentageStopManager(settings.percentage_stop_loss_pct, settings.percentage_stop_take_profit_pct)
+    
+    sentiment_df_ml: Optional[pd.DataFrame] = None
+    if settings.simulated_sentiment_data_path and settings.enable_sentiment_analysis:
+        sentiment_csv_path = settings.simulated_sentiment_data_path
+        if os.path.exists(sentiment_csv_path):
+            try:
+                sentiment_df_ml = pd.read_csv(sentiment_csv_path, parse_dates=['timestamp'], index_col='timestamp')
+                if not sentiment_df_ml.empty:
+                    if sentiment_df_ml.index.tz is None: sentiment_df_ml.index = sentiment_df_ml.index.tz_localize('UTC')
+                    else: sentiment_df_ml.index = sentiment_df_ml.index.tz_convert('UTC')
+                    if 'sentiment_score' in sentiment_df_ml.columns:
+                         logger.info(f"Loaded {len(sentiment_df_ml)} simulated sentiment entries for ML strategy backtest.")
+                    else: sentiment_df_ml = None; logger.error("sentiment_score col missing in CSV for ML test.")
+                else: sentiment_df_ml = None
+            except Exception: sentiment_df_ml = None; logger.error("Error loading sentiment CSV for ML test.", exc_info=True)
+        else: logger.warning("Sentiment CSV for ML test not found.")
+
+
+    backtest_engine_ml = BacktestingEngine(
+        data_feed_df=data_df_ml, strategy=ml_strategy, initial_capital=initial_capital,
+        commission_bps=commission_bps, position_sizer=position_sizer_ml, stop_manager=stop_manager_ml,
+        sentiment_data_df=sentiment_df_ml 
+    )
+    logger.info(f"Running Phase 5 backtest (MLForecasterStrategy) on {symbol_ml}...")
+    trades_log_ml, final_portfolio_ml = backtest_engine_ml.run()
+
+    if trades_log_ml:
+        logger.info(f"MLForecasterStrategy Backtest completed. Generated {len(trades_log_ml)} trades.")
+        pa_ml = PerformanceAnalyzer(trades_log_ml, initial_capital, final_portfolio_ml['final_portfolio_value'])
+        metrics_ml = pa_ml.calculate_metrics()
+        pa_ml.print_summary(metrics_ml)
+    else:
+        logger.info(f"MLForecasterStrategy Backtest completed. No trades executed. Final portfolio: ${final_portfolio_ml['final_portfolio_value']:.2f}")
+
+    root_logger.info("Phase 5 Demonstration completed.")
+
+
 async def main():
     root_logger.info("Kamikaze Komodo Program Starting...")
     if not settings:
@@ -364,20 +532,38 @@ async def main():
     # await run_phase1_demonstration()
     # await run_phase2_demonstration()
     # await run_phase3_demonstration()
-    await run_phase4_demonstration()
+    # await run_phase4_demonstration()
+    await run_phase5_demonstration() 
     
     root_logger.info("Kamikaze Komodo Program Finished.")
 
 if __name__ == "__main__":
     try:
-        # Ensure GOOGLE_APPLICATION_CREDENTIALS is set in your environment for Vertex AI
-        # e.g., export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-file.json"
-        # Also, ensure playwright browsers are installed if using BrowserAgent:
-        # playwright install --with-deps chromium
         if settings and settings.sentiment_llm_provider == "VertexAI" and not settings.vertex_ai_project_id:
              root_logger.warning("Vertex AI is selected, but Project ID is not set in config.ini. AI features may fail.")
              root_logger.warning("Please set your GCP Project ID in kamikaze_komodo/config/config.ini ([VertexAI] -> ProjectID)")
              root_logger.warning("And ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set.")
+        
+        if not os.path.exists("logs"): os.makedirs("logs")
+        
+        # Check if model directory exists, create if not. 
+        # Training pipeline also attempts to create it.
+        model_dir_from_config = "ml_models/trained_models" # Default or read from config
+        if settings and settings.config.has_option("LightGBM_Forecaster", "ModelSavePath"):
+            model_dir_from_config = settings.config.get("LightGBM_Forecaster", "ModelSavePath")
+
+        # Construct full path for model directory if relative
+        if not os.path.isabs(model_dir_from_config):
+            # Assuming 'kamikaze_komodo' is the package directory one level down from project root
+            project_root_approx = os.path.dirname(os.path.abspath(__file__)) 
+            # If main.py is in kamikaze_komodo/, then project_root_approx is kamikaze_komodo/
+            # If ModelSavePath is 'ml_models/trained_models', it's relative to project root
+            # So, if main.py is in kamikaze_komodo/, the path should be ../ml_models/trained_models
+            # Or, if ml_models is inside kamikaze_komodo package: ml_models/trained_models
+            # Current pipeline code assumes ModelSavePath is relative to the *package* dir if not absolute.
+            # Let's keep consistency with pipeline logic or define a clear PROJECT_ROOT.
+            # For now, rely on pipeline's dir creation.
+            pass
 
 
         asyncio.run(main())

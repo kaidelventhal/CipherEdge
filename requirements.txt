@@ -11,3 +11,4 @@ google-cloud-aiplatform # Often a peer dependency for Vertex AI
 newspaper3k
 feedparser
 httpx
+lightgbm

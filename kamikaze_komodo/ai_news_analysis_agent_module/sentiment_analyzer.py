@@ -2,7 +2,7 @@
 from typing import List, Dict, Optional, Any
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field as PydanticField
+from langchain_core.pydantic_v1 import BaseModel, Field as PydanticField # Renamed Field to avoid Pydantic v2 conflict if other modules use it
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.core.models import NewsArticle
 from kamikaze_komodo.config.settings import settings # Import global settings
@@ -38,13 +38,13 @@ class SentimentAnalyzer:
                  "You are an expert financial sentiment analyst specializing in cryptocurrency markets. "
                  "Analyze the provided text for its sentiment towards the cryptocurrency or market mentioned. "
                  "Consider factors like news events, market reactions, technological developments, and regulatory news. "
-                 "Your output MUST be in JSON format, adhering to the following Pydantic model: "
+                 "Your output MUST be in JSON format, adhering to the following Pydantic model structure (SentimentAnalysisOutput): "
                  "```json\n"
                  "{\n"
                  "  \"sentiment_label\": \"<label: 'very bullish'|'bullish'|'neutral'|'bearish'|'very bearish'|'mixed'>\",\n"
                  "  \"sentiment_score\": <score_float: -1.0 to 1.0>,\n"
-                 "  \"key_themes\": [\"<theme1>\", \"<theme2>\"],\n"
-                 "  \"confidence\": <confidence_float: 0.0 to 1.0>\n"
+                 "  \"key_themes\": [\"<theme1>\", \"<theme2>\"],\n" # Optional
+                 "  \"confidence\": <confidence_float: 0.0 to 1.0>\n" # Optional
                  "}\n"
                  "```"
                  "sentiment_score should range from -1.0 (very bearish/negative) to 1.0 (very bullish/positive). Neutral is 0.0. "
@@ -63,13 +63,13 @@ class SentimentAnalyzer:
                 logger.error("Vertex AI project ID or location is not configured in settings.py. Sentiment analysis will not work.")
                 raise ValueError("Vertex AI project ID or location missing.")
             try:
-                from langchain_google_vertexai import ChatVertexAI
+                from langchain_google_vertexai import ChatVertexAI # Correct import
                 self.llm = ChatVertexAI(
                     project=settings.vertex_ai_project_id,
                     location=settings.vertex_ai_location,
                     model_name=settings.vertex_ai_sentiment_model_name,
-                    temperature=0.1,
-                    # max_output_tokens=1024, # Optional: if needed
+                    temperature=0.1, # Low temperature for more factual/consistent sentiment
+                    # max_output_tokens=1024, # Optional: if needed for longer summaries/themes
                 )
                 logger.info(f"SentimentAnalyzer initialized with Vertex AI model: {settings.vertex_ai_sentiment_model_name}")
                 logger.info("Ensure Google Cloud credentials (GOOGLE_APPLICATION_CREDENTIALS) are set in your environment.")
@@ -79,7 +79,6 @@ class SentimentAnalyzer:
             except Exception as e:
                 logger.error(f"Failed to initialize Vertex AI LLM ({settings.vertex_ai_sentiment_model_name}): {e}", exc_info=True)
                 raise
-
         else:
             logger.error(f"Unsupported LLM provider: {self.llm_provider}")
             raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
@@ -102,27 +101,32 @@ class SentimentAnalyzer:
 
         logger.debug(f"Analyzing sentiment for text (context: {asset_context}): '{text[:200]}...'")
         try:
-            # A more robust solution would use token counting. This is a simple character limit.
-            # Gemini Flash models usually have a large context window (e.g., 128k tokens for gemini-1.5-flash variants)
-            # but the older flash might be 32k. Max input tokens for gemini-2.5-flash-preview is high, let's be generous.
-            # The prompt itself consumes tokens.
-            max_chars = 25000 # Approx 6k-8k tokens.
+            # Max input tokens for gemini-2.5-flash-preview is high, but let's be reasonable.
+            # Prompt itself consumes tokens. Max 30k chars ~ 7.5k tokens for text.
+            max_chars = 30000 
             if len(text) > max_chars:
                 logger.warning(f"Text too long ({len(text)} chars), truncating to {max_chars} for sentiment analysis.")
                 text = text[:max_chars]
 
-            response = await self.chain.ainvoke({"text_to_analyze": text, "asset_context": asset_context})
+            response_dict = await self.chain.ainvoke({"text_to_analyze": text, "asset_context": asset_context})
             
-            if isinstance(response, dict):
+            # The output_parser should already return a SentimentAnalysisOutput object if successful
+            # If it's a dict, it means JsonOutputParser might not have directly instantiated the Pydantic model
+            # or the LLM didn't return perfect JSON matching the Pydantic model structure.
+            if isinstance(response_dict, dict):
                 try:
-                    validated_output = SentimentAnalysisOutput(**response)
+                    # Attempt to create Pydantic model from dict for validation and type safety
+                    validated_output = SentimentAnalysisOutput(**response_dict)
                     logger.info(f"Structured sentiment for '{asset_context}': Label: {validated_output.sentiment_label}, Score: {validated_output.sentiment_score:.2f}, Confidence: {validated_output.confidence}")
                     return validated_output
                 except Exception as p_exc: 
-                    logger.error(f"Pydantic validation failed for LLM JSON output: {response}. Error: {p_exc}")
+                    logger.error(f"Pydantic validation failed for LLM JSON output: {response_dict}. Error: {p_exc}", exc_info=True)
                     return None
+            elif isinstance(response_dict, SentimentAnalysisOutput): # Already a Pydantic object
+                 logger.info(f"Structured sentiment for '{asset_context}': Label: {response_dict.sentiment_label}, Score: {response_dict.sentiment_score:.2f}, Confidence: {response_dict.confidence}")
+                 return response_dict
             else:
-                logger.error(f"Unexpected structured sentiment analysis output type: {type(response)}. Content: {response}")
+                logger.error(f"Unexpected structured sentiment analysis output type: {type(response_dict)}. Content: {str(response_dict)[:500]}")
                 return None
         except Exception as e:
             logger.error(f"Error during structured sentiment analysis with {self.llm_provider} model: {e}", exc_info=True)
@@ -137,13 +141,12 @@ class SentimentAnalyzer:
             asset_context = ", ".join(article.related_symbols)
         elif not asset_context:
             # Try to infer from title if no symbols
-            # This is a simple heuristic; more advanced would be NER
             if "bitcoin" in article.title.lower() or "btc" in article.title.lower():
-                 asset_context = "Bitcoin"
+                asset_context = "Bitcoin"
             elif "ethereum" in article.title.lower() or "eth" in article.title.lower():
-                 asset_context = "Ethereum"
+                asset_context = "Ethereum"
             else:
-                 asset_context = "the cryptocurrency market"
+                asset_context = "the cryptocurrency market"
 
         text_to_analyze = article.title
         if article.summary:
@@ -163,14 +166,14 @@ class SentimentAnalyzer:
             article.key_themes = sentiment_result.key_themes
             article.sentiment_confidence = sentiment_result.confidence
             # article.raw_llm_response can store the full dict if needed for debugging
-            # article.raw_llm_response = sentiment_result.model_dump() # Stores the Pydantic model as dict
+            # article.raw_llm_response = sentiment_result.model_dump() 
         return article
 
 # Example Usage
 async def main_sentiment_example():
     """ Example of using the SentimentAnalyzer """
     if not settings or not settings.vertex_ai_project_id:
-        logger.error("Vertex AI settings (Project ID) not loaded for sentiment example. Set GOOGLE_APPLICATION_CREDENTIALS.")
+        logger.error("Vertex AI settings (Project ID) not loaded for sentiment example. Set GOOGLE_APPLICATION_CREDENTIALS env var.")
         return
 
     try:

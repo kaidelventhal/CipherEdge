@@ -1,5 +1,6 @@
 # kamikaze_komodo/strategy_framework/base_strategy.py
 # Updated to include optional sentiment_score in on_bar_data
+# Updated update_data_history for new BarData fields
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
@@ -19,7 +20,12 @@ class BaseStrategy(ABC):
         self.timeframe = timeframe
         self.params = params if params is not None else {}
         self.current_position_status: Optional[SignalType] = None # Tracks if currently LONG, SHORT or None (no position)
-        self.data_history = pd.DataFrame()
+        # Initialize data_history with potential columns including new ones from BarData
+        self.data_history = pd.DataFrame(columns=[
+            'open', 'high', 'low', 'close', 'volume', 
+            'atr', 'sentiment_score', 
+            'prediction_value', 'prediction_confidence' # New Phase 5 fields
+        ])
         logger.info(f"Initialized BaseStrategy '{self.name}' for {symbol} ({timeframe}) with params: {self.params}")
 
     @abstractmethod
@@ -31,7 +37,7 @@ class BaseStrategy(ABC):
         Args:
             data (pd.DataFrame): DataFrame with historical OHLCV data, indexed by timestamp.
                                  Expected columns: 'open', 'high', 'low', 'close', 'volume'.
-                                 May also contain 'atr', 'sentiment_score'.
+                                 May also contain 'atr', 'sentiment_score', 'prediction_value', 'prediction_confidence'.
             sentiment_series (Optional[pd.Series]): Series with historical sentiment scores, indexed by timestamp.
 
         Returns:
@@ -46,9 +52,10 @@ class BaseStrategy(ABC):
         This method is typically called for each new data point in a live or simulated environment.
 
         Args:
-            bar_data (BarData): The new BarData object, potentially with .atr or .sentiment_score.
+            bar_data (BarData): The new BarData object, potentially with .atr or .sentiment_score,
+                                and potentially .prediction_value, .prediction_confidence populated by ML strategy.
             sentiment_score (Optional[float]): External sentiment score for the current bar.
-                                               (Note: bar_data.sentiment_score might also be used if populated by engine)
+                                                 (Note: bar_data.sentiment_score might also be used if populated by engine)
 
         Returns:
             Optional[SignalType]: A signal (LONG, SHORT, HOLD, CLOSE_LONG, CLOSE_SHORT) or None if no action.
@@ -56,17 +63,16 @@ class BaseStrategy(ABC):
         pass
         
     def update_data_history(self, new_bar_data: BarData):
-        """Appends new bar data to the internal history including ATR and sentiment if available."""
+        """Appends new bar data to the internal history including ATR, sentiment, and prediction fields if available."""
         new_row_data = {
             'open': new_bar_data.open, 'high': new_bar_data.high,
             'low': new_bar_data.low, 'close': new_bar_data.close,
-            'volume': new_bar_data.volume
+            'volume': new_bar_data.volume,
+            'atr': new_bar_data.atr if hasattr(new_bar_data, 'atr') else None,
+            'sentiment_score': new_bar_data.sentiment_score if hasattr(new_bar_data, 'sentiment_score') else None,
+            'prediction_value': new_bar_data.prediction_value if hasattr(new_bar_data, 'prediction_value') else None,
+            'prediction_confidence': new_bar_data.prediction_confidence if hasattr(new_bar_data, 'prediction_confidence') else None,
         }
-        # Add optional fields if they exist on BarData model
-        if hasattr(new_bar_data, 'atr') and new_bar_data.atr is not None:
-            new_row_data['atr'] = new_bar_data.atr
-        if hasattr(new_bar_data, 'sentiment_score') and new_bar_data.sentiment_score is not None:
-            new_row_data['sentiment_score'] = new_bar_data.sentiment_score
             
         new_row = pd.DataFrame([new_row_data], index=[new_bar_data.timestamp])
         
@@ -74,16 +80,16 @@ class BaseStrategy(ABC):
         if not self.data_history.empty:
             for col in new_row.columns:
                 if col not in self.data_history.columns:
-                    self.data_history[col] = pd.NA # Or np.nan
+                    self.data_history[col] = pd.NA 
             for col in self.data_history.columns:
-                 if col not in new_row.columns:
+                if col not in new_row.columns:
                     new_row[col] = pd.NA
 
 
         self.data_history = pd.concat([self.data_history, new_row])
         
         # Optional: Keep only a certain number of recent rows to manage memory
-        # max_history_length = self.params.get('max_history_length', 1000)
+        # max_history_length = self.params.get('max_history_length', 1000) # Example: 1000 bars
         # if len(self.data_history) > max_history_length:
         #     self.data_history = self.data_history.iloc[-max_history_length:]
 

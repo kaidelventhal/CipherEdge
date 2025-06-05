@@ -34,14 +34,14 @@ class Config:
         self.log_file_path: str = self.config.get('General', 'LogFilePath', fallback='logs/kamikaze_komodo.log')
 
         # API Settings
-        self.exchange_id_to_use: str = self.config.get('API', 'ExchangeID', fallback='krakenfutures') # Changed default for clarity with PF_XBTUSD
+        self.exchange_id_to_use: str = self.config.get('API', 'ExchangeID', fallback='krakenfutures') 
         self.kraken_api_key: Optional[str] = self.secrets.get('KRAKEN_API', 'API_KEY', fallback=None)
         self.kraken_secret_key: Optional[str] = self.secrets.get('KRAKEN_API', 'SECRET_KEY', fallback=None)
         self.kraken_testnet: bool = self.config.getboolean('API', 'KrakenTestnet', fallback=True)
 
         # Data Fetching Settings
         self.default_symbol: str = self.config.get('DataFetching', 'DefaultSymbol', fallback='PF_XBTUSD')
-        self.default_timeframe: str = self.config.get('DataFetching', 'DefaultTimeframe', fallback='4h') # Changed from 1h to match config
+        self.default_timeframe: str = self.config.get('DataFetching', 'DefaultTimeframe', fallback='4h') 
         self.historical_data_days: int = self.config.getint('DataFetching', 'HistoricalDataDays', fallback=365)
         self.data_fetch_limit_per_call: int = self.config.getint('DataFetching', 'DataFetchLimitPerCall', fallback=500)
 
@@ -50,7 +50,7 @@ class Config:
         self.default_leverage: float = self.config.getfloat('Trading', 'DefaultLeverage', fallback=1.0)
         self.commission_bps: float = self.config.getfloat('Trading', 'CommissionBPS', fallback=10.0)
 
-        # EWMAC Strategy Settings
+        # EWMAC Strategy Settings (Example, specific strategies below)
         self.ewmac_short_window: int = self.config.getint('EWMAC_Strategy', 'ShortWindow', fallback=12)
         self.ewmac_long_window: int = self.config.getint('EWMAC_Strategy', 'LongWindow', fallback=26)
         self.ewmac_signal_window: int = self.config.getint('EWMAC_Strategy', 'SignalWindow', fallback=9)
@@ -72,7 +72,6 @@ class Config:
 
         # --- Phase 3: Portfolio Constructor Settings ---
         self.asset_allocator_type: str = self.config.get('PortfolioConstructor', 'AssetAllocator', fallback='FixedWeight')
-        # Attempt to dynamically get the default allocation for the default symbol
         default_symbol_config_key = f'DefaultAllocation_{self.default_symbol.replace("/", "").replace(":", "")}'
         self.default_allocation_for_symbol: float = self.config.getfloat('PortfolioConstructor', default_symbol_config_key, fallback=1.0)
         self.rebalancer_deviation_threshold: float = self.config.getfloat('PortfolioConstructor', 'Rebalancer_DeviationThreshold', fallback=0.05)
@@ -81,6 +80,8 @@ class Config:
         self.enable_sentiment_analysis: bool = self.config.getboolean('AI_NewsAnalysis', 'EnableSentimentAnalysis', fallback=True)
         self.sentiment_llm_provider: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMProvider', fallback='VertexAI')
         self.browser_agent_llm_provider: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMProvider', fallback='VertexAI')
+        self.browser_agent_max_steps: int = self.config.getint('AI_NewsAnalysis', 'BrowserAgent_Max_Steps', fallback=20)
+
 
         self.sentiment_filter_threshold_long: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Long', fallback=0.1)
         self.sentiment_filter_threshold_short: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Short', fallback=-0.1)
@@ -103,65 +104,65 @@ class Config:
             logger.warning("Vertex AI ProjectID is set to 'your-gcp-project-id'. Please update it in config.ini.")
             self.vertex_ai_project_id = None
 
-
-        # Legacy Ollama Settings (can be removed if not needed for fallback)
-        # self.ollama_base_url: Optional[str] = self.config.get('Ollama_Legacy', 'BaseURL', fallback="http://localhost:11434")
-        # if self.ollama_base_url and self.ollama_base_url.lower() in ['none', '']: self.ollama_base_url = None
-        # self.ollama_sentiment_llm_model: str = self.config.get('Ollama_Legacy', 'SentimentLLMModel', fallback='gemma3:12b')
-        # self.ollama_browser_agent_llm_model: str = self.config.get('Ollama_Legacy', 'BrowserAgent_LLMModel', fallback='gemma3:12b')
-
-
-        # RSS Feeds
         self.rss_feeds: List[Dict[str, str]] = []
         if self.config.has_section('AI_NewsAnalysis'):
             for key, value in self.config.items('AI_NewsAnalysis'):
-                if key.startswith("rssfeed_"):
-                    feed_name = key.replace("rssfeed_", "").replace("_", " ").title()
+                if key.startswith("rssfeed_"): # configparser lowercases keys
+                    feed_name_part = key.replace("rssfeed_", "")
+                    feed_name = feed_name_part.replace("_", " ").title()
                     self.rss_feeds.append({"name": feed_name, "url": value})
-        if not self.rss_feeds:
+        if not self.rss_feeds: # This warning was in the user's log
             logger.warning("No RSS feeds configured in config.ini under [AI_NewsAnalysis] with 'RSSFeed_' prefix.")
 
 
-    def get_strategy_params(self, strategy_name: str) -> dict:
+    def get_strategy_params(self, strategy_or_component_name: str) -> dict:
+        """
+        Retrieves parameters for a given strategy or component section name.
+        Example section names: EWMAC_Strategy, LightGBM_Forecaster, MLForecaster_Strategy
+        """
         params = {}
-        section_name = f"{strategy_name}_Strategy"
-        if self.config.has_section(section_name):
-            params = dict(self.config.items(section_name))
-            for key, value in params.items():
-                # Convert to int, float, bool, None where appropriate
-                if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
-                    params[key] = int(value)
-                else:
-                    try:
-                        params[key] = float(value)
-                    except ValueError:
-                        if value.lower() == 'true': params[key] = True
-                        elif value.lower() == 'false': params[key] = False
-                        elif value.lower() == 'none': params[key] = None
-        else:
-            logger.warning(f"No specific configuration section found for strategy: {section_name}. Using defaults or globally passed params.")
+        found_section = None
+        for section in self.config.sections(): 
+            if section.lower() == strategy_or_component_name.lower():
+                found_section = section
+                break
         
-        # Add relevant global AI settings to strategy params if not already present
-        # This allows strategies to easily access sentiment thresholds.
+        if found_section and self.config.has_section(found_section):
+            params = dict(self.config.items(found_section))
+            for key, value in params.items():
+                original_value = value 
+                try:
+                    # Attempt int conversion first
+                    if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                        params[key] = int(value)
+                    else:
+                        # Attempt float conversion if not int
+                        try:
+                            params[key] = float(value)
+                        except ValueError:
+                             # If not float, check for bool/None or keep as string
+                            if value.lower() == 'true': params[key] = True
+                            elif value.lower() == 'false': params[key] = False
+                            elif value.lower() == 'none': params[key] = None
+                            else:
+                                params[key] = original_value # Keep as original string
+                except Exception as e: 
+                    logger.debug(f"Could not auto-convert param '{key}' with value '{original_value}' in section '{found_section}'. Kept as string. Error: {e}")
+                    params[key] = original_value 
+        else:
+            logger.warning(f"No specific configuration section found for: {strategy_or_component_name}. Using defaults or globally passed params.")
+        
+        # Ensure global AI settings are available if not overridden in specific strategy section
+        # These are typically more for strategies than for model forecaster components themselves
         if 'sentiment_filter_long_threshold' not in params:
             params['sentiment_filter_long_threshold'] = self.sentiment_filter_threshold_long
         if 'sentiment_filter_short_threshold' not in params:
             params['sentiment_filter_short_threshold'] = self.sentiment_filter_threshold_short
-        if 'atr_period' not in params and strategy_name == "EWMAC": # Specifically for EWMAC
-             params['atr_period'] = self.ewmac_atr_period
-
-
+            
         return params
 
     def get_news_scraper_config(self) -> Dict[str, Any]:
-        cfg = {"rss_feeds": self.rss_feeds, "websites": []} # Websites can be added similarly if needed
-        # Example for websites:
-        # if self.config.has_section('AI_NewsAnalysis'):
-        # for key, value in self.config.items('AI_NewsAnalysis'):
-        # if key.startswith("websitescrape_") and key.endswith("_url"):
-        # site_id = key.replace("websitescrape_", "").replace("_url", "")
-        # site_name = self.config.get('AI_NewsAnalysis', f'WebsiteScrape_{site_id}_Name', fallback=site_id.capitalize())
-        # cfg["websites"].append({"name": site_name, "url": value})
+        cfg = {"rss_feeds": self.rss_feeds, "websites": []} 
         return cfg
 
 try:
@@ -173,5 +174,5 @@ except Exception as e_global:
     logger.critical(f"Failed to initialize Config object: {e_global}", exc_info=True)
     settings = None # type: ignore
 
-if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()):
+if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.kraken_api_key).upper() or "D27PYGI95TLS" in str(settings.kraken_api_key).upper()): # Check specific placeholder
     logger.warning(f"API Key for '{settings.exchange_id_to_use}' appears to be a placeholder or is not configured in secrets.ini. Authenticated interaction will be limited/simulated.")

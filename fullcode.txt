@@ -1,4 +1,4 @@
-kamikaze_komodo\app_logger.py:
+kamikaze_komodo/app_logger.py:
 <code>
 # kamikaze_komodo/app_logger.py
 import logging
@@ -41,7 +41,7 @@ def get_logger(module_name: str) -> logging.Logger:
     return logging.getLogger(f"KamikazeKomodo.{module_name}")
 </code>
 
-kamikaze_komodo\main.py:
+kamikaze_komodo/main.py:
 <code>
 # kamikaze_komodo/main.py
 import asyncio
@@ -432,13 +432,13 @@ if __name__ == "__main__":
         root_logger.critical(f"Critical error in main execution: {e}", exc_info=True)
 </code>
 
-kamikaze_komodo\__init__.py:
+kamikaze_komodo/__init__.py:
 <code>
 # kamikaze_komodo/__init__.py
 # This file makes the 'root' directory a Python package.
 </code>
 
-kamikaze_komodo\ai_news_analysis_agent_module\browser_agent.py:
+kamikaze_komodo/ai_news_analysis_agent_module/browser_agent.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/browser_agent.py
 import asyncio
@@ -589,7 +589,7 @@ if __name__ == "__main__":
         print("To run, set BrowserAgent_Enable = True in config.ini and ensure Vertex AI is configured.")
 </code>
 
-kamikaze_komodo\ai_news_analysis_agent_module\news_scraper.py:
+kamikaze_komodo/ai_news_analysis_agent_module/news_scraper.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/news_scraper.py
 import asyncio
@@ -901,7 +901,7 @@ if __name__ == "__main__":
         print("NewsScraper is not enabled in settings, or settings failed to load. Skipping example.")
 </code>
 
-kamikaze_komodo\ai_news_analysis_agent_module\notification_listener.py:
+kamikaze_komodo/ai_news_analysis_agent_module/notification_listener.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/notification_listener.py
 from kamikaze_komodo.app_logger import get_logger
@@ -1038,7 +1038,7 @@ async def dummy_notification_callback(notification_details: Dict[str, Any]):
 #         logger.info("Notification listener example stopped by user.")
 </code>
 
-kamikaze_komodo\ai_news_analysis_agent_module\sentiment_analyzer.py:
+kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py
 from typing import List, Dict, Optional, Any
@@ -1260,14 +1260,13 @@ if __name__ == "__main__":
     asyncio.run(main_sentiment_example())
 </code>
 
-kamikaze_komodo\ai_news_analysis_agent_module\__init__.py:
+kamikaze_komodo/ai_news_analysis_agent_module/__init__.py:
 <code>
 # kamikaze_komodo/ai_news_analysis_agent_module/__init__.py
 # This file makes the 'ai_news_analysis_agent_module' directory a Python package.
-logger_name = "KamikazeKomodo.ai_news_analysis_agent_module" # Satisfy linter
 </code>
 
-kamikaze_komodo\backtesting_engine\engine.py:
+kamikaze_komodo/backtesting_engine/engine.py:
 <code>
 # kamikaze_komodo/backtesting_engine/engine.py
 # Significantly updated to integrate PositionSizer and StopManager
@@ -1603,7 +1602,7 @@ class BacktestingEngine:
         return self.trades_log, final_portfolio_state
 </code>
 
-kamikaze_komodo\backtesting_engine\performance_analyzer.py:
+kamikaze_komodo/backtesting_engine/performance_analyzer.py:
 <code>
 # kamikaze_komodo/backtesting_engine/performance_analyzer.py
 import pandas as pd
@@ -1841,13 +1840,13 @@ if __name__ == '__main__':
     # print(equity)
 </code>
 
-kamikaze_komodo\backtesting_engine\__init__.py:
+kamikaze_komodo/backtesting_engine/__init__.py:
 <code>
 # kamikaze_komodo/backtesting_engine/__init__.py
 # This file makes the 'backtesting_engine' directory a Python package.
 </code>
 
-kamikaze_komodo\config\config.ini:
+kamikaze_komodo/config/config.ini:
 <code>
 # kamikaze_komodo/config/config.ini
 # Added Phase 3 and Phase 4 settings, Vertex AI settings, and RSS feeds
@@ -1959,7 +1958,7 @@ RSSFeed_ConsensysNews = https://consensys.io/category/news/feed/
 ; BrowserAgent_LLMModel = gemma3:12b
 </code>
 
-kamikaze_komodo\config\secrets.ini:
+kamikaze_komodo/config/secrets.ini:
 <code>
 ; kamikaze_komodo/config/secrets.ini
 ; This file should be in .gitignore and contain sensitive information.
@@ -1972,7 +1971,7 @@ User = db_user
 Password = db_password
 </code>
 
-kamikaze_komodo\config\settings.py:
+kamikaze_komodo/config/settings.py:
 <code>
 # kamikaze_komodo/config/settings.py
 import configparser
@@ -2091,7 +2090,7 @@ class Config:
         self.rss_feeds: List[Dict[str, str]] = []
         if self.config.has_section('AI_NewsAnalysis'):
             for key, value in self.config.items('AI_NewsAnalysis'):
-                if key.startswith("rssfeed_"):
+                if key.startswith("RSSFeed_"):
                     feed_name = key.replace("rssfeed_", "").replace("_", " ").title()
                     self.rss_feeds.append({"name": feed_name, "url": value})
         if not self.rss_feeds:
@@ -2153,13 +2152,13 @@ if settings and (not settings.kraken_api_key or "YOUR_API_KEY" in str(settings.k
     logger.warning(f"API Key for '{settings.exchange_id_to_use}' appears to be a placeholder or is not configured in secrets.ini. Authenticated interaction will be limited/simulated.")
 </code>
 
-kamikaze_komodo\config\__init__.py:
+kamikaze_komodo/config/__init__.py:
 <code>
 # kamikaze_komodo/config/__init__.py
 # This file makes the 'config' directory a Python package.
 </code>
 
-kamikaze_komodo\core\enums.py:
+kamikaze_komodo/core/enums.py:
 <code>
 # kamikaze_komodo/core/enums.py
 from enum import Enum
@@ -2222,7 +2221,7 @@ class TradeResult(Enum):
     BREAKEVEN = "BREAKEVEN"
 </code>
 
-kamikaze_komodo\core\models.py:
+kamikaze_komodo/core/models.py:
 <code>
 # kamikaze_komodo/core/models.py
 # Added fields to NewsArticle and Trade as potentially needed by new modules.
@@ -2335,7 +2334,7 @@ class PortfolioSnapshot(BaseModel):
     open_pnl_usd: float = Field(0.0, description="Total open Profit/Loss in USD for current positions")
 </code>
 
-kamikaze_komodo\core\utils.py:
+kamikaze_komodo/core/utils.py:
 <code>
 # kamikaze_komodo/core/utils.py
 from datetime import datetime, timezone
@@ -2385,13 +2384,13 @@ def ohlcv_to_bardata(ohlcv: list, symbol: str, timeframe: str) -> BarData:
 # - etc.
 </code>
 
-kamikaze_komodo\core\__init__.py:
+kamikaze_komodo/core/__init__.py:
 <code>
 # kamikaze_komodo/core/__init__.py
 # This file makes the 'core' directory a Python package.
 </code>
 
-kamikaze_komodo\data_handling\database_manager.py:
+kamikaze_komodo/data_handling/database_manager.py:
 <code>
 # kamikaze_komodo/data_handling/database_manager.py
 # Updated to include store/retrieve for NewsArticle
@@ -2630,7 +2629,7 @@ class DatabaseManager:
     def __del__(self): self.close()
 </code>
 
-kamikaze_komodo\data_handling\data_fetcher.py:
+kamikaze_komodo/data_handling/data_fetcher.py:
 <code>
 # kamikaze_komodo/data_handling/data_fetcher.py
 import ccxt.async_support as ccxt # Use async version for future compatibility
@@ -2859,13 +2858,13 @@ if __name__ == '__main__':
     pass
 </code>
 
-kamikaze_komodo\data_handling\__init__.py:
+kamikaze_komodo/data_handling/__init__.py:
 <code>
 # kamikaze_komodo/data_handling/__init__.py
 # This file makes the 'data_handling' directory a Python package.
 </code>
 
-kamikaze_komodo\exchange_interaction\exchange_api.py:
+kamikaze_komodo/exchange_interaction/exchange_api.py:
 <code>
 # kamikaze_komodo/exchange_interaction/exchange_api.py
 import ccxt.async_support as ccxt
@@ -3139,13 +3138,13 @@ async def main_exchange_api_example():
 #     asyncio.run(main_exchange_api_example())
 </code>
 
-kamikaze_komodo\exchange_interaction\__init__.py:
+kamikaze_komodo/exchange_interaction/__init__.py:
 <code>
 # kamikaze_komodo/exchange_interaction/__init__.py
 # This file makes the 'exchange_interaction' directory a Python package.
 </code>
 
-kamikaze_komodo\portfolio_constructor\asset_allocator.py:
+kamikaze_komodo/portfolio_constructor/asset_allocator.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/asset_allocator.py
 from abc import ABC, abstractmethod
@@ -3238,7 +3237,7 @@ class FixedWeightAssetAllocator(BaseAssetAllocator):
 # class HRPAllocator(BaseAssetAllocator): ...
 </code>
 
-kamikaze_komodo\portfolio_constructor\rebalancer.py:
+kamikaze_komodo/portfolio_constructor/rebalancer.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/rebalancer.py
 from abc import ABC, abstractmethod
@@ -3364,14 +3363,13 @@ class BasicRebalancer(BaseRebalancer):
         return orders
 </code>
 
-kamikaze_komodo\portfolio_constructor\__init__.py:
+kamikaze_komodo/portfolio_constructor/__init__.py:
 <code>
 # kamikaze_komodo/portfolio_constructor/__init__.py
 # This file makes the 'portfolio_constructor' directory a Python package.
-logger_name = "KamikazeKomodo.portfolio_constructor" # Satisfy linter if file is empty
 </code>
 
-kamikaze_komodo\risk_control_module\position_sizer.py:
+kamikaze_komodo/risk_control_module/position_sizer.py:
 <code>
 # kamikaze_komodo/risk_control_module/position_sizer.py
 from abc import ABC, abstractmethod
@@ -3543,7 +3541,7 @@ class ATRBasedPositionSizer(BasePositionSizer):
         return position_size
 </code>
 
-kamikaze_komodo\risk_control_module\stop_manager.py:
+kamikaze_komodo/risk_control_module/stop_manager.py:
 <code>
 # kamikaze_komodo/risk_control_module/stop_manager.py
 from abc import ABC, abstractmethod
@@ -3704,14 +3702,14 @@ class ATRStopManager(BaseStopManager):
         return None
 </code>
 
-kamikaze_komodo\risk_control_module\__init__.py:
+kamikaze_komodo/risk_control_module/__init__.py:
 <code>
 # kamikaze_komodo/risk_control_module/__init__.py
 # This file makes the 'risk_control_module' directory a Python package.
 logger_name = "KamikazeKomodo.risk_control_module" # Satisfy linter
 </code>
 
-kamikaze_komodo\strategy_framework\base_strategy.py:
+kamikaze_komodo/strategy_framework/base_strategy.py:
 <code>
 # kamikaze_komodo/strategy_framework/base_strategy.py
 # Updated to include optional sentiment_score in on_bar_data
@@ -3814,7 +3812,7 @@ class BaseStrategy(ABC):
         return self.__class__.__name__
 </code>
 
-kamikaze_komodo\strategy_framework\strategy_manager.py:
+kamikaze_komodo/strategy_framework/strategy_manager.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategy_manager.py
 from typing import List, Dict, Any
@@ -3929,13 +3927,13 @@ if __name__ == '__main__':
         logger.error("Settings not loaded, cannot run StrategyManager example.")
 </code>
 
-kamikaze_komodo\strategy_framework\__init__.py:
+kamikaze_komodo/strategy_framework/__init__.py:
 <code>
 # kamikaze_komodo/strategy_framework/__init__.py
 # This file makes the 'strategy_framework' directory a Python package.
 </code>
 
-kamikaze_komodo\strategy_framework\strategies\ewmac.py:
+kamikaze_komodo/strategy_framework/strategies/ewmac.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/ewmac.py
 import pandas as pd
@@ -4118,7 +4116,7 @@ class EWMACStrategy(BaseStrategy):
         return signal_to_return
 </code>
 
-kamikaze_komodo\strategy_framework\strategies\__init__.py:
+kamikaze_komodo/strategy_framework/strategies/__init__.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/__init__.py
 # This file makes the 'strategies' directory a Python package.
