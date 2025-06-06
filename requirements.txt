@@ -1,14 +1,39 @@
-# requirements.txt
+# Core Data & Utility
 pandas
 pandas-ta
-pydantic
-python-dotenv # If you use it to load .env files programmatically, though VS Code handles it for debugging
-ccxt
 numpy
+pydantic
+python-dotenv
+httpx
+feedparser # For news scraping
+google-cloud-aiplatform # For Vertex AI
+
+# Exchange Interaction
+ccxt
+
+# Machine Learning - General
+scikit-learn
+joblib
+
+# Machine Learning - Specific Models/Pipelines
+lightgbm
+xgboost
+statsmodels # Corrected name
+
+# Langchain & AI
 langchain
 langchain-google-vertexai
-google-cloud-aiplatform # Often a peer dependency for Vertex AI
-newspaper3k
-feedparser
-httpx
-lightgbm
+newspaper3k # For news scraping
+
+# Optimization
+optuna
+
+# Scheduling
+apscheduler
+
+# Advanced Portfolio (HRP)
+scipy
+
+# Optional AI Agent Modules (add if you use these features)
+# browser-use
+# jeepney

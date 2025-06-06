@@ -1,11 +1,13 @@
 # kamikaze_komodo/core/models.py
 # Added fields to NewsArticle and Trade as potentially needed by new modules.
 # Added prediction_value and prediction_confidence to BarData for Phase 5 ML strategy.
+# Phase 6: Added PairTrade model.
 from typing import Optional, List, Dict, Any # Added Any
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 import pydantic # Added timezone
 from kamikaze_komodo.core.enums import OrderType, OrderSide, SignalType, TradeResult
+
 class BarData(BaseModel):
     """
     Represents OHLCV market data for a specific time interval.
@@ -26,6 +28,11 @@ class BarData(BaseModel):
     # Fields for ML predictions (Phase 5)
     prediction_value: Optional[float] = Field(None, description="Predicted value by an ML model (e.g., future price, return)")
     prediction_confidence: Optional[float] = Field(None, description="Confidence of the ML prediction (0.0 to 1.0)")
+
+    # Phase 6: Market Regime
+    market_regime: Optional[int] = Field(None, description="Market regime identified by a model (e.g., 0, 1, 2)")
+
+
     class Config:
         frozen = False # Allow modification by strategies/engine (e.g. to add ATR or predictions)
         
@@ -42,6 +49,7 @@ class Order(BaseModel):
     filled_amount: float = Field(0.0, ge=0, description="Amount of the order that has been filled")
     average_fill_price: Optional[float] = Field(None, description="Average price at which the order was filled")
     exchange_id: Optional[str] = Field(None, description="Order ID from the exchange")
+
 class Trade(BaseModel):
     """
     Represents an executed trade.
@@ -63,11 +71,13 @@ class Trade(BaseModel):
     notes: Optional[str] = Field(None, description="Any notes related to the trade")
     # Added for ATR based stops or other context
     custom_fields: Dict[str, Any] = Field(default_factory=dict, description="Custom fields for additional trade data, e.g., atr_at_entry")
+
     @pydantic.field_validator('exit_price')
     def exit_price_must_be_positive(cls, v):
         if v is not None and v <= 0:
             raise ValueError('exit_price must be positive if set')
         return v
+
 class NewsArticle(BaseModel):
     """
     Represents a news article relevant to market analysis.
@@ -89,6 +99,8 @@ class NewsArticle(BaseModel):
     
     related_symbols: Optional[List[str]] = Field(default_factory=list, description="Cryptocurrencies mentioned or related")
     raw_llm_response: Optional[Dict[str, Any]] = Field(None, description="Raw response from LLM for sentiment if available")
+
+
 class PortfolioSnapshot(BaseModel):
     # ... (no changes from existing)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -96,3 +108,37 @@ class PortfolioSnapshot(BaseModel):
     cash_balance_usd: float = Field(..., description="Available cash in USD")
     positions: Dict[str, float] = Field(default_factory=dict, description="Asset quantities, e.g., {'BTC': 0.5, 'ETH': 10}") # symbol: quantity
     open_pnl_usd: float = Field(0.0, description="Total open Profit/Loss in USD for current positions")
+
+
+class PairTrade(BaseModel):
+    """
+    Represents a pair trade involving two assets.
+    Phase 6 Model.
+    """
+    id: str = Field(..., description="Unique identifier for the pair trade")
+    asset1_symbol: str = Field(..., description="Symbol of the first asset in the pair")
+    asset2_symbol: str = Field(..., description="Symbol of the second asset in the pair")
+    
+    asset1_trade_id: Optional[str] = Field(None, description="Trade ID for the leg involving asset1")
+    asset2_trade_id: Optional[str] = Field(None, description="Trade ID for the leg involving asset2")
+
+    entry_timestamp: datetime = Field(..., description="Time the pair trade was initiated")
+    exit_timestamp: Optional[datetime] = Field(None, description="Time the pair trade was closed")
+    
+    # Spread details at entry
+    entry_spread: float = Field(..., description="Spread value at the time of entry")
+    entry_zscore: Optional[float] = Field(None, description="Z-score of the spread at entry")
+    
+    # Spread details at exit
+    exit_spread: Optional[float] = Field(None, description="Spread value at the time of exit")
+    exit_zscore: Optional[float] = Field(None, description="Z-score of the spread at exit")
+
+    # P&L for the combined pair trade
+    pnl: Optional[float] = Field(None, description="Overall Profit or Loss for the pair trade")
+    pnl_percentage: Optional[float] = Field(None, description="Overall Profit or Loss percentage for the pair trade")
+    
+    total_commission: float = Field(0.0, ge=0, description="Total commission for both legs of the pair trade")
+    status: str = Field("open", description="Status of the pair trade (e.g., open, closed)")
+    exit_reason: Optional[str] = Field(None, description="Reason for closing the pair trade (e.g., spread reversion, stop loss)")
+    notes: Optional[str] = Field(None, description="Any notes related to the pair trade")
+    custom_fields: Dict[str, Any] = Field(default_factory=dict, description="Custom fields for additional pair trade data")

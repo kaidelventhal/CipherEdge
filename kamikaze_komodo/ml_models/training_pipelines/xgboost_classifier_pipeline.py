@@ -1,8 +1,8 @@
-# FILE: kamikaze_komodo/ml_models/training_pipelines/lightgbm_pipeline.py
+# FILE: kamikaze_komodo/ml_models/training_pipelines/xgboost_classifier_pipeline.py
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 import os
-from kamikaze_komodo.ml_models.price_forecasting.lightgbm_forecaster import LightGBMForecaster
+from kamikaze_komodo.ml_models.price_forecasting.xgboost_classifier_forecaster import XGBoostClassifierForecaster
 from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
 from kamikaze_komodo.data_handling.database_manager import DatabaseManager
 from kamikaze_komodo.app_logger import get_logger
@@ -10,8 +10,8 @@ from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
 
 logger = get_logger(__name__)
 
-class LightGBMTrainingPipeline:
-    def __init__(self, symbol: str, timeframe: str, model_config_section: str = "LightGBM_Forecaster"):
+class XGBoostClassifierTrainingPipeline:
+    def __init__(self, symbol: str, timeframe: str, model_config_section: str = "XGBoost_Classifier_Forecaster"):
         if not settings:
             raise ValueError("Settings not loaded.")
         self.symbol = symbol
@@ -21,22 +21,22 @@ class LightGBMTrainingPipeline:
         self.model_params = settings.get_strategy_params(model_config_section)
         
         _model_base_path = self.model_params.get('modelsavepath', 'ml_models/trained_models')
-        _model_filename = self.model_params.get('modelfilename', f"lgbm_{symbol.replace('/', '_').lower()}_{timeframe}.joblib")
+        _model_filename = self.model_params.get('modelfilename', f"xgb_classifier_{symbol.replace('/', '_').lower()}_{timeframe}.joblib")
         
         # FIX: Use the consistent PROJECT_ROOT from settings.py
         if not os.path.isabs(_model_base_path):
             self.model_save_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
         else:
             self.model_save_path_dir = _model_base_path
-
+            
         if not os.path.exists(self.model_save_path_dir):
             os.makedirs(self.model_save_path_dir, exist_ok=True)
-            logger.info(f"Created directory for trained models: {self.model_save_path_dir}")
+            logger.info(f"Created directory for trained XGBoost models: {self.model_save_path_dir}")
             
         self.model_full_save_path = os.path.join(self.model_save_path_dir, _model_filename)
         
-        self.forecaster = LightGBMForecaster(params=self.model_params)
-        logger.info(f"LightGBM Training Pipeline initialized for {symbol} ({timeframe}). Model will be saved to: {self.model_full_save_path}")
+        self.forecaster = XGBoostClassifierForecaster(params=self.model_params)
+        logger.info(f"XGBoost Training Pipeline initialized for {symbol} ({timeframe}). Model will be saved to: {self.model_full_save_path}")
 
     async def fetch_training_data(self, days_history: int = 730) -> pd.DataFrame:
         db_manager = DatabaseManager()
@@ -49,12 +49,12 @@ class LightGBMTrainingPipeline:
         
         required_bars = int(self.model_params.get('minbarsfortraining', 200))
         if not historical_bars or len(historical_bars) < required_bars:
-            logger.info(f"Insufficient data in DB ({len(historical_bars)} bars found). Fetching fresh data from exchange...")
+            logger.info(f"Insufficient data in DB ({len(historical_bars)} bars found). Fetching fresh data for XGBoost training...")
             historical_bars = await data_fetcher.fetch_historical_data_for_period(self.symbol, self.timeframe, start_date, end_date)
             if historical_bars:
                 db_manager.store_bar_data(historical_bars)
             else:
-                logger.error("Failed to fetch training data.")
+                logger.error("Failed to fetch training data for XGBoost.")
                 await data_fetcher.close()
                 db_manager.close()
                 return pd.DataFrame()
@@ -62,31 +62,32 @@ class LightGBMTrainingPipeline:
         await data_fetcher.close()
         db_manager.close()
         if not historical_bars:
-            logger.error("No historical bars available for training.")
+            logger.error("No historical bars available for XGBoost training.")
             return pd.DataFrame()
+            
         data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
         data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
         data_df.set_index('timestamp', inplace=True)
         data_df.sort_index(inplace=True)
         
-        logger.info(f"Fetched {len(data_df)} bars for training {self.symbol} ({self.timeframe}).")
+        logger.info(f"Fetched {len(data_df)} bars for XGBoost training {self.symbol} ({self.timeframe}).")
         return data_df
 
     async def run_training(self):
         days_history = int(self.model_params.get('trainingdayshistory', 730))
         historical_df = await self.fetch_training_data(days_history=days_history)
         if historical_df.empty:
-            logger.error("Cannot run training, no historical data.")
+            logger.error("Cannot run XGBoost training, no historical data.")
             return
-        target_col_name = self.model_params.get('targetcolumnname', 'close_change_lag_1_future')
-        
+
+        target_def = self.model_params.get('targetdefinition', 'next_bar_direction')
         feature_cols_str = self.model_params.get('feature_columns')
         feature_columns = [col.strip() for col in feature_cols_str.split(',')] if feature_cols_str else None
         
-        logger.info(f"Starting training with target: '{target_col_name}', features: {feature_columns if feature_columns else 'default in forecaster'}")
-        self.forecaster.train(historical_df, target_column=target_col_name, feature_columns_to_use=feature_columns)
+        logger.info(f"Starting XGBoost training with target definition: '{target_def}', features: {feature_columns if feature_columns else 'default in forecaster'}")
+        self.forecaster.train(historical_df, target_definition=target_def, feature_columns=feature_columns)
         
         if self.forecaster.model:
             self.forecaster.save_model(self.model_full_save_path)
         else:
-            logger.error("Training did not produce a model. Model not saved.")
+            logger.error("XGBoost training did not produce a model. Model not saved.")

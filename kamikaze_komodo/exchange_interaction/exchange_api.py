@@ -7,27 +7,34 @@ from kamikaze_komodo.core.models import Order
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings # Import global settings
 from datetime import datetime, timezone # Ensure timezone is imported
+
 logger = get_logger(__name__)
+
 class ExchangeAPI:
     """
     Handles interactions with the cryptocurrency exchange.
     Manages order placement, cancellation, and fetching account information.
+    Phase 6: Added explicit check for short selling capability (though CCXT often handles this implicitly for derivative exchanges).
     """
     def __init__(self, exchange_id: Optional[str] = None): # exchange_id is now optional
         if not settings:
             logger.critical("Settings not loaded. ExchangeAPI cannot be initialized.")
             raise ValueError("Settings not loaded.")
+
         self.exchange_id = exchange_id if exchange_id else settings.exchange_id_to_use
         exchange_class = getattr(ccxt, self.exchange_id, None)
+
         if not exchange_class:
             logger.error(f"Exchange {self.exchange_id} is not supported by CCXT.")
             raise ValueError(f"Exchange {self.exchange_id} is not supported by CCXT.")
+
         # Determine API keys based on the exchange_id
         # This example assumes a single set of keys in settings (e.g., KRAKEN_API)
         # For a multi-exchange system, you'd fetch keys specific to self.exchange_id
         api_key = settings.kraken_api_key # Defaulting to Kraken keys for now
         secret_key = settings.kraken_secret_key # Defaulting to Kraken keys
         use_testnet = settings.kraken_testnet # Defaulting to Kraken testnet setting
+
         # Example for specific exchange key loading (if settings were structured differently)
         # if self.exchange_id == 'binance':
         #     api_key = settings.binance_api_key
@@ -35,6 +42,7 @@ class ExchangeAPI:
         #     use_testnet = settings.binance_testnet
         # elif self.exchange_id == 'krakenfutures':
         #     api_key = settings.kraken_futures_api_key # etc.
+
         config = {
             'apiKey': api_key,
             'secret': secret_key,
@@ -42,6 +50,7 @@ class ExchangeAPI:
         }
         self.exchange = exchange_class(config)
         logger.info(f"Initialized ExchangeAPI for {self.exchange_id}.")
+
         if use_testnet:
             if hasattr(self.exchange, 'set_sandbox_mode') and callable(self.exchange.set_sandbox_mode):
                 try:
@@ -55,8 +64,10 @@ class ExchangeAPI:
                 logger.warning(f"{self.exchange_id} does not have set_sandbox_mode. Testnet relies on specific API keys or default URL pointing to sandbox.")
         else:
             logger.info(f"Running in live mode for {self.exchange_id}.")
+
         if not api_key or "YOUR_API_KEY" in str(api_key).upper() or (isinstance(api_key, str) and "D27PYGI95TLS" in api_key.upper()): # Check specific placeholder
             logger.warning(f"API key for {self.exchange_id} appears to be a placeholder or is not configured. Authenticated calls may fail.")
+
     async def fetch_balance(self) -> Optional[Dict]:
         if not self.exchange.has['fetchBalance']:
             logger.error(f"{self.exchange_id} does not support fetchBalance.")
@@ -75,6 +86,7 @@ class ExchangeAPI:
         except Exception as e:
             logger.error(f"An unexpected error occurred fetching balance: {e}", exc_info=True)
         return None
+
     async def create_order(
         self,
         symbol: str,
@@ -87,13 +99,26 @@ class ExchangeAPI:
         if order_type == OrderType.LIMIT and price is None:
             logger.error("Price must be specified for a LIMIT order.")
             return None
+
         if not self.exchange.has['createOrder']:
             logger.error(f"{self.exchange_id} does not support createOrder.")
             return None
+
         order_type_str = order_type.value
         side_str = side.value
+
+        # Phase 6: Check for short selling specific capabilities (conceptual for CCXT futures)
+        if side == OrderSide.SELL: # This could be opening a short or closing a long
+            # For many futures exchanges, 'sell' with no existing position implies short.
+            # CCXT often handles this implicitly. Some exchanges might need specific params for short.
+            # e.g., params = {'reduceOnly': False} if it was to ensure opening a new position.
+            # We assume for now that a simple SELL order will open a short if no long position exists.
+            # If the exchange has explicit shorting methods (less common in CCXT unified API), that'd be different.
+            logger.info(f"Preparing to place a SELL order for {symbol}. This may open a short position.")
+
         try:
             logger.info(f"Attempting to place {side_str} {order_type_str} order for {amount} {symbol} at price {price if price else 'market'} on {self.exchange_id}")
+            
             # Check for placeholder API keys again before actual call
             is_placeholder_key = not self.exchange.apiKey or "YOUR_API_KEY" in self.exchange.apiKey.upper() or "D27PYGI95TLS" in self.exchange.apiKey.upper()
             if settings.kraken_testnet and is_placeholder_key : # Use general testnet flag
@@ -107,11 +132,13 @@ class ExchangeAPI:
                     amount=amount,
                     price=price if order_type == OrderType.LIMIT else None,
                     timestamp=datetime.now(timezone.utc), # Use timezone.utc
-                    status="open",
+                    status="open", # Simulate as open
                     exchange_id=simulated_order_id
                 )
+
             exchange_order_response = await self.exchange.create_order(symbol, order_type_str, side_str, amount, price, params or {})
             logger.info(f"Successfully placed order on {self.exchange_id}. Order ID: {exchange_order_response.get('id')}")
+            
             created_order = Order(
                 id=str(exchange_order_response.get('id')),
                 symbol=exchange_order_response.get('symbol'),
@@ -126,6 +153,7 @@ class ExchangeAPI:
                 exchange_id=str(exchange_order_response.get('id'))
             )
             return created_order
+
         except ccxt.InsufficientFunds as e:
             logger.error(f"Insufficient funds to place order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
         except ccxt.InvalidOrder as e:
@@ -139,6 +167,7 @@ class ExchangeAPI:
         except Exception as e:
             logger.error(f"An unexpected error occurred placing order for {symbol} on {self.exchange_id}: {e}", exc_info=True)
         return None
+
     async def cancel_order(self, order_id: str, symbol: Optional[str] = None, params: Optional[Dict] = None) -> bool:
         if not self.exchange.has['cancelOrder']:
             logger.error(f"{self.exchange_id} does not support cancelOrder.")
@@ -156,6 +185,7 @@ class ExchangeAPI:
         except Exception as e:
             logger.error(f"An unexpected error occurred canceling order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         return False
+
     async def fetch_order(self, order_id: str, symbol: Optional[str] = None) -> Optional[Order]:
         if not self.exchange.has['fetchOrder']:
             logger.warning(f"{self.exchange_id} does not support fetching individual orders directly.")
@@ -181,11 +211,13 @@ class ExchangeAPI:
         except Exception as e:
             logger.error(f"Error fetching order {order_id} on {self.exchange_id}: {e}", exc_info=True)
         return None
+
     async def fetch_open_orders(self, symbol: Optional[str] = None, since: Optional[datetime] = None, limit: Optional[int] = None) -> List[Order]: # Changed since to datetime
         open_orders_list = []
         if not self.exchange.has['fetchOpenOrders']:
             logger.warning(f"{self.exchange_id} does not support fetching open orders.")
             return open_orders_list
+
         try:
             since_timestamp_ms = int(since.timestamp() * 1000) if since else None
             raw_orders = await self.exchange.fetch_open_orders(symbol, since_timestamp_ms, limit)
@@ -208,6 +240,7 @@ class ExchangeAPI:
         except Exception as e:
             logger.error(f"Error fetching open orders on {self.exchange_id}: {e}", exc_info=True)
         return open_orders_list
+
     async def close(self):
         try:
             if hasattr(self.exchange, 'close') and callable(self.exchange.close):
@@ -215,16 +248,19 @@ class ExchangeAPI:
                 logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
         except Exception as e:
             logger.error(f"Error closing CCXT exchange connection for {self.exchange_id}: {e}", exc_info=True)
+
 # Example Usage (run within an asyncio event loop):
 async def main_exchange_api_example():
     if not settings:
         print("Settings could not be loaded. Exiting example.")
         return
+
     exchange_api = ExchangeAPI() # Uses exchange_id from settings
     balance = await exchange_api.fetch_balance()
     if balance:
         logger.info(f"Free USD Balance: {balance.get('USD', {}).get('free', 'N/A')}")
         logger.info(f"Free {settings.default_symbol.split('/')[0]} Balance: {balance.get(settings.default_symbol.split('/')[0], {}).get('free', 'N/A')}")
+
     # target_symbol = settings.default_symbol
     # order_to_place = await exchange_api.create_order(
     #     symbol=target_symbol,
@@ -237,4 +273,5 @@ async def main_exchange_api_example():
     #     logger.info(f"Practice order placed/simulated: ID {order_to_place.id}, Status {order_to_place.status}")
     # else:
     #     logger.warning("Practice order placement failed or was not attempted.")
+
     await exchange_api.close()

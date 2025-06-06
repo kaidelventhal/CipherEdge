@@ -1,8 +1,8 @@
-# kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py
+# FILE: kamikaze_komodo/ai_news_analysis_agent_module/sentiment_analyzer.py
 from typing import List, Dict, Optional, Any
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field as PydanticField # Renamed Field to avoid Pydantic v2 conflict if other modules use it
+from pydantic import BaseModel, Field
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.core.models import NewsArticle
 from kamikaze_komodo.config.settings import settings # Import global settings
@@ -11,10 +11,10 @@ logger = get_logger(__name__)
 
 # Pydantic model for structured sentiment output
 class SentimentAnalysisOutput(BaseModel):
-    sentiment_label: str = PydanticField(description="The overall sentiment (e.g., 'very bullish', 'bullish', 'neutral', 'bearish', 'very bearish', 'mixed').")
-    sentiment_score: float = PydanticField(description="A numerical score from -1.0 (very negative) to 1.0 (very positive). Neutral is 0.0.")
-    key_themes: Optional[List[str]] = PydanticField(default_factory=list, description="List of key themes or topics identified in the text related to sentiment.")
-    confidence: Optional[float] = PydanticField(description="Confidence score of the sentiment analysis (0.0 to 1.0).")
+    sentiment_label: str = Field(description="The overall sentiment (e.g., 'very bullish', 'bullish', 'neutral', 'bearish', 'very bearish', 'mixed').")
+    sentiment_score: float = Field(description="A numerical score from -1.0 (very negative) to 1.0 (very positive). Neutral is 0.0.")
+    key_themes: Optional[List[str]] = Field(default_factory=list, description="List of key themes or topics identified in the text related to sentiment.")
+    confidence: Optional[float] = Field(description="Confidence score of the sentiment analysis (0.0 to 1.0).")
 
 class SentimentAnalyzer:
     """
@@ -123,8 +123,8 @@ class SentimentAnalyzer:
                     logger.error(f"Pydantic validation failed for LLM JSON output: {response_dict}. Error: {p_exc}", exc_info=True)
                     return None
             elif isinstance(response_dict, SentimentAnalysisOutput): # Already a Pydantic object
-                 logger.info(f"Structured sentiment for '{asset_context}': Label: {response_dict.sentiment_label}, Score: {response_dict.sentiment_score:.2f}, Confidence: {response_dict.confidence}")
-                 return response_dict
+                   logger.info(f"Structured sentiment for '{asset_context}': Label: {response_dict.sentiment_label}, Score: {response_dict.sentiment_score:.2f}, Confidence: {response_dict.confidence}")
+                   return response_dict
             else:
                 logger.error(f"Unexpected structured sentiment analysis output type: {type(response_dict)}. Content: {str(response_dict)[:500]}")
                 return None

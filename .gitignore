@@ -81,3 +81,5 @@ coverage.xml
 # Temporary files
 *.swp
 *~
+
+.venv

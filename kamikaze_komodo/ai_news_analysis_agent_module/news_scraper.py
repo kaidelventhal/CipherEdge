@@ -279,11 +279,11 @@ async def main_scraper_example():
 
     for i, article in enumerate(all_scraped_articles[:10]): # Log details for first 10
         logger.info(f"{i+1}. Source: {article.source}, Title: {article.title}")
-        logger.info(f"   URL: {article.url}")
-        logger.info(f"   Date: {article.publication_date}, Retrieved: {article.retrieval_date}")
-        logger.info(f"   Symbols: {article.related_symbols}")
+        logger.info(f"    URL: {article.url}")
+        logger.info(f"    Date: {article.publication_date}, Retrieved: {article.retrieval_date}")
+        logger.info(f"    Symbols: {article.related_symbols}")
         if article.summary:
-            logger.info(f"   Summary: {article.summary[:150]}...")
+            logger.info(f"    Summary: {article.summary[:150]}...")
         # if article.content: # Content can be very long
             # logger.info(f" Content Preview: {article.content[:100]}...")
 
