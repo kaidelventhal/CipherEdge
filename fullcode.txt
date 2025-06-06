@@ -1862,6 +1862,8 @@ class BacktestingEngine:
             self.current_cash -= commission_cost
             if side == OrderSide.BUY:
                 self.current_cash -= cost_of_assets
+            else: # On short entry, cash increases by proceeds (margin not modeled)
+                self.current_cash += cost_of_assets
 
             custom_fields = {"atr_at_entry": bar_for_atr_calc.atr, "entry_bar_index": bar_index}
             self.active_trades[trade_symbol] = Trade(
@@ -1884,10 +1886,10 @@ class BacktestingEngine:
             pnl = 0.0
             if active_trade_for_symbol.side == OrderSide.BUY:
                 pnl = (execution_price - active_trade_for_symbol.entry_price) * active_trade_for_symbol.amount
-                self.current_cash += exit_value
+                self.current_cash += exit_value # Receive cash from selling the asset
             else: # SELL
                 pnl = (active_trade_for_symbol.entry_price - execution_price) * active_trade_for_symbol.amount
-                self.current_cash += (active_trade_for_symbol.entry_price * active_trade_for_symbol.amount) + pnl
+                self.current_cash -= exit_value # Pay cash to buy back the asset (cover short)
             
             pnl -= (active_trade_for_symbol.commission + commission_cost)
             self.current_cash -= commission_cost
@@ -1918,20 +1920,20 @@ class BacktestingEngine:
         if not active_trade or not self.stop_manager:
             return
 
-        # Pass bar_index to stop loss checker for time-based stops
         stop_loss_price = self.stop_manager.check_stop_loss(active_trade, current_bar_data_for_symbol, bar_index)
         if stop_loss_price is not None:
-            exit_side = OrderSide.SELL if active_trade.side == OrderSide.BUY else OrderSide.BUY
+            # FIX: The variable is named current_bar_data_for_symbol
             self._execute_trade_command(SignalCommand(
                 signal_type=SignalType.CLOSE_LONG if active_trade.side == OrderSide.BUY else SignalType.CLOSE_SHORT,
                 symbol=trade_symbol, price=stop_loss_price
             ), current_bar_data_for_symbol, bar_index)
-            return # Exit as trade is closed
+            return
 
-        active_trade = self.active_trades.get(trade_symbol) # Re-check as SL might have closed it
+        active_trade = self.active_trades.get(trade_symbol)
         if active_trade:
             take_profit_price = self.stop_manager.check_take_profit(active_trade, current_bar_data_for_symbol)
             if take_profit_price is not None:
+                # FIX: The variable is named current_bar_data_for_symbol
                 self._execute_trade_command(SignalCommand(
                     signal_type=SignalType.CLOSE_LONG if active_trade.side == OrderSide.BUY else SignalType.CLOSE_SHORT,
                     symbol=trade_symbol, price=take_profit_price
@@ -1969,35 +1971,35 @@ class BacktestingEngine:
             sentiment_val = self.sentiment_data_df['sentiment_score'].asof(ts_aware) if self.sentiment_data_df is not None else None
             current_bar_asset1.sentiment_score = sentiment_val if pd.notna(sentiment_val) else None
 
-            # Handle stops for all active trades
             for sym_key in list(self.active_trades.keys()):
                 bar_for_stop_check = current_bar_asset1 if sym_key == self.strategy.symbol else current_bar_asset2
                 if bar_for_stop_check:
                     self._handle_stop_take_profit(bar_for_stop_check, sym_key, i)
 
-            # Generate signals
             strategy_output: Union[Optional[SignalType], List[SignalCommand]] = self.strategy.on_bar_data(current_bar_asset1)
             
             if strategy_output:
-                commands = strategy_output if isinstance(strategy_output, list) else [SignalCommand(signal_type=strategy_output, symbol=self.strategy.symbol, price=current_bar_asset1.close, related_bar_data=current_bar_asset1)]
-                for command in commands:
-                    if command.signal_type != SignalType.HOLD:
-                        bar_for_cmd = current_bar_asset1 if command.symbol == self.strategy.symbol else current_bar_asset2
-                        if bar_for_cmd:
-                            self._execute_trade_command(command, bar_for_cmd, i)
+                commands = strategy_output if isinstance(strategy_output, list) else []
+                if isinstance(strategy_output, SignalType) and strategy_output != SignalType.HOLD:
+                     commands = [SignalCommand(signal_type=strategy_output, symbol=self.strategy.symbol, price=current_bar_asset1.close, related_bar_data=current_bar_asset1)]
 
-            # Update portfolio MTM and history
+                for command in commands:
+                    bar_for_cmd = current_bar_asset1 if command.symbol == self.strategy.symbol else current_bar_asset2
+                    if bar_for_cmd:
+                        self._execute_trade_command(command, bar_for_cmd, i)
+
             mtm_value = self.current_cash
             for trade in self.active_trades.values():
                 price = current_bar_asset1.close if trade.symbol == current_bar_asset1.symbol else (current_bar_asset2.close if current_bar_asset2 else trade.entry_price)
                 if trade.side == OrderSide.BUY:
                     mtm_value += trade.amount * price
                 else: # Short
-                    mtm_value += (trade.entry_price - price) * trade.amount + (trade.amount * trade.entry_price)
+                    initial_proceeds = trade.amount * trade.entry_price
+                    cost_to_cover = trade.amount * price
+                    mtm_value += initial_proceeds - cost_to_cover
             
             self.portfolio_history.append({"timestamp": ts_aware, "cash": self.current_cash, "total_value": mtm_value})
 
-        # Close any open positions at the end of the backtest
         if self.active_trades:
             last_bar = self.data_feed_df.iloc[-1]
             last_bar_data = BarData(timestamp=last_bar.name, open=last_bar['open'], high=last_bar['high'], low=last_bar['low'], close=last_bar['close'], volume=last_bar['volume'], symbol=self.strategy.symbol)
@@ -2685,6 +2687,22 @@ ReturnThresholds_Percent = -0.001, 0.001
 TrainingDaysHistory = 730
 MinBarsForTraining = 200
 
+[LSTM_Forecaster]
+ModelSavePath = ml_models/trained_models
+ModelFileName = lstm_pf_xbtusd_4h.pth
+TargetColumnName = close_change_lag_1_future
+TrainingDaysHistory = 730
+MinBarsForTraining = 200
+SequenceLength = 60
+NumFeatures = 5
+HiddenSize = 50
+NumLayers = 2
+Dropout = 0.2
+NumEpochs = 25
+BatchSize = 32
+LearningRate = 0.001
+FeatureColumns = close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14
+
 [KMeans_Regime_Model]
 ModelSavePath = ml_models/trained_models
 NumClusters = 3
@@ -2719,8 +2737,8 @@ from typing import Dict, List, Optional, Any
 
 logger = get_logger(__name__)
 
-# Define a single, reliable project root.
-# This file is in .../kamikaze_komodo/config, so two levels up is the project root.
+# Define a single, reliable project root that other modules can import.
+# This file is in .../kamikaze_komodo/config/, so two levels up is the project root.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -2873,7 +2891,6 @@ class Config:
         else:
             logger.warning(f"No specific configuration section found for: {strategy_or_component_name}. Using defaults or globally passed params.")
         
-        # FIX: Use the correct attribute names as defined in __init__
         if 'sentimentfilter_long_threshold' not in params:
             params['sentimentfilter_long_threshold'] = self.sentiment_filter_threshold_long
         if 'sentimentfilter_short_threshold' not in params:
@@ -4142,6 +4159,60 @@ if __name__ == "__main__":
     asyncio.run(main_inference_example())
 </code>
 
+kamikaze_komodo/ml_models/inference_pipelines/lstm_inference.py:
+<code>
+# FILE: kamikaze_komodo/ml_models/inference_pipelines/lstm_inference.py
+import pandas as pd
+from typing import Optional
+import os
+from kamikaze_komodo.ml_models.price_forecasting.lstm_model import LSTMForecaster
+from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
+
+logger = get_logger(__name__)
+
+class LSTMInference:
+    def __init__(self, symbol: str, timeframe: str, model_config_section: str = "LSTM_Forecaster"):
+        if not settings:
+            raise ValueError("Settings not loaded.")
+        self.symbol = symbol
+        self.timeframe = timeframe
+        
+        model_params_config = settings.get_strategy_params(model_config_section)
+        
+        _model_base_path = model_params_config.get('modelsavepath', 'ml_models/trained_models')
+        _model_filename = model_params_config.get('modelfilename', f"lstm_{symbol.replace('/', '_').lower()}_{timeframe}.pth")
+        
+        if not os.path.isabs(_model_base_path):
+            self.model_load_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
+        else:
+            self.model_load_path_dir = _model_base_path
+            
+        self.model_full_load_path = os.path.join(self.model_load_path_dir, _model_filename)
+        self.forecaster = LSTMForecaster(model_path=self.model_full_load_path, params=model_params_config)
+        
+        if self.forecaster.model is None:
+            logger.warning(f"LSTMInference: Model could not be loaded from {self.model_full_load_path}. Predictions will not be available.")
+
+    def get_prediction(self, current_data_history: pd.DataFrame) -> Optional[float]:
+        """
+        Gets a single prediction based on the current data history.
+        """
+        if self.forecaster.model is None:
+            logger.warning("No model loaded, cannot get prediction.")
+            return None
+        if current_data_history.empty:
+            logger.warning("Data history is empty, cannot get prediction.")
+            return None
+            
+        prediction_output = self.forecaster.predict(current_data_history)
+        
+        if prediction_output is None:
+            return None
+            
+        return float(prediction_output)
+</code>
+
 kamikaze_komodo/ml_models/inference_pipelines/xgboost_classifier_inference.py:
 <code>
 # FILE: kamikaze_komodo/ml_models/inference_pipelines/xgboost_classifier_inference.py
@@ -4544,6 +4615,192 @@ class LightGBMForecaster(BasePriceForecaster):
             logger.error(f"Error loading LightGBM model from {_path}: {e}", exc_info=True)
             self.model = None
             self.trained_feature_columns_ = None
+</code>
+
+kamikaze_komodo/ml_models/price_forecasting/lstm_model.py:
+<code>
+# FILE: kamikaze_komodo/ml_models/price_forecasting/lstm_model.py
+import torch
+import torch.nn as nn
+import pandas as pd
+import numpy as np
+import joblib
+from typing import Optional, Dict, Any, List, Union, Tuple
+from sklearn.preprocessing import MinMaxScaler
+
+from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
+from kamikaze_komodo.app_logger import get_logger
+
+logger = get_logger(__name__)
+
+# Define the PyTorch LSTM Model
+class LSTMNetwork(nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, num_layers: int, output_size: int, dropout: float):
+        super(LSTMNetwork, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        h0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        c0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :]) # Get the output from the last time step
+        return out
+
+class LSTMForecaster(BasePriceForecaster):
+    """
+    LSTM-based price forecaster using PyTorch.
+    Predicts future price movement based on a sequence of historical data.
+    """
+    def __init__(self, model_path: Optional[str] = None, params: Optional[Dict[str, Any]] = None):
+        super().__init__(model_path, params)
+        self.scaler = MinMaxScaler(feature_range=(-1, 1))
+        self.sequence_length = int(self.params.get('sequencelength', 60))
+        self.num_features = int(self.params.get('numfeatures', 5))
+        self.feature_columns = self.params.get('featurecolumns', 'close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14').split(',')
+
+        # Model hyperparameters
+        self.hidden_size = int(self.params.get('hiddensize', 50))
+        self.num_layers = int(self.params.get('numlayers', 2))
+        self.dropout = float(self.params.get('dropout', 0.2))
+        self.num_epochs = int(self.params.get('numepochs', 20))
+        self.batch_size = int(self.params.get('batchsize', 32))
+        self.learning_rate = float(self.params.get('learningrate', 0.001))
+        
+        # Initialize model architecture but don't load weights from super() as it's not implemented there for torch
+        self.model = LSTMNetwork(
+            input_size=self.num_features,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            output_size=1,
+            dropout=self.dropout
+        )
+        if self.model_path:
+            self.load_model(self.model_path)
+
+    def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        if data.empty:
+            return pd.DataFrame()
+        df = data.copy()
+        
+        import pandas_ta as ta
+        for lag in [1, 3, 5]:
+            df[f'log_return_lag_{lag}'] = np.log(df['close'] / df['close'].shift(lag))
+            df[f'close_change_lag_{lag}'] = df['close'].pct_change(lag)
+        df['volatility_5'] = df['log_return_lag_1'].rolling(window=5).std()
+        df.ta.rsi(length=14, append=True, col_names=('RSI_14',))
+        
+        df = df.replace([np.inf, -np.inf], np.nan)
+        return df
+
+    def _create_sequences(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        X, y = [], []
+        for i in range(len(data) - self.sequence_length):
+            X.append(data[i:(i + self.sequence_length), :-1])
+            y.append(data[i + self.sequence_length, -1])
+        return np.array(X), np.array(y)
+
+    def train(self, historical_data: pd.DataFrame, target_column: str = 'close_change_lag_1_future', feature_columns: Optional[list] = None):
+        logger.info("Starting LSTM training...")
+        df_features = self.create_features(historical_data)
+        
+        if feature_columns is None:
+            feature_columns = self.feature_columns
+            
+        df_features['target'] = df_features['close'].pct_change(1).shift(-1)
+        df_features = df_features.dropna()
+        
+        # Select features and target
+        features_with_target = df_features[feature_columns + ['target']]
+        
+        # Scale data
+        scaled_data = self.scaler.fit_transform(features_with_target)
+        
+        X, y = self._create_sequences(scaled_data)
+        X_train = torch.from_numpy(X).float()
+        y_train = torch.from_numpy(y).float().view(-1, 1)
+        
+        # Training Loop
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        
+        for epoch in range(self.num_epochs):
+            self.model.train()
+            outputs = self.model(X_train)
+            optimizer.zero_grad()
+            loss = criterion(outputs, y_train)
+            loss.backward()
+            optimizer.step()
+            if (epoch + 1) % 5 == 0:
+                logger.info(f'Epoch [{epoch+1}/{self.num_epochs}], Loss: {loss.item():.6f}')
+
+        self.trained_feature_columns_ = feature_columns
+        logger.info("LSTM model training completed.")
+
+    def predict(self, new_data: pd.DataFrame, feature_columns: Optional[list] = None) -> Union[pd.Series, float, None]:
+        if self.model is None or self.scaler is None:
+            logger.error("Model or scaler not available.")
+            return None
+        
+        self.model.eval()
+        df_features = self.create_features(new_data)
+        
+        if feature_columns is None:
+            feature_columns = self.trained_feature_columns_ or self.feature_columns
+            
+        # We need `sequence_length` of feature data to make one prediction
+        if len(df_features) < self.sequence_length:
+            return None
+            
+        last_sequence_unscaled = df_features[feature_columns].iloc[-self.sequence_length:]
+        if last_sequence_unscaled.isnull().values.any():
+            return None # Cannot predict with NaNs
+        
+        # Note: Scaler was fit on features + target. We only scale features here for prediction.
+        # This is a simplification; a more robust approach uses separate scalers.
+        # For now, we reuse the fitted scaler on the feature subset.
+        scaled_sequence = self.scaler.transform(pd.concat([last_sequence_unscaled, pd.DataFrame(columns=['target'])], axis=1))[:, :-1]
+        
+        with torch.no_grad():
+            input_tensor = torch.from_numpy(scaled_sequence).float().unsqueeze(0) # Add batch dimension
+            prediction_scaled = self.model(input_tensor)
+        
+        # We need to inverse transform the prediction. This requires a dummy array.
+        dummy_array = np.zeros((1, len(feature_columns) + 1))
+        dummy_array[0, -1] = prediction_scaled.item()
+        prediction_unscaled = self.scaler.inverse_transform(dummy_array)[0, -1]
+        
+        return float(prediction_unscaled)
+
+    def save_model(self, path: str):
+        try:
+            state = {
+                'model_state_dict': self.model.state_dict(),
+                'scaler': self.scaler,
+                'params': self.params,
+                'trained_feature_columns': getattr(self, 'trained_feature_columns_', None)
+            }
+            torch.save(state, path)
+            logger.info(f"LSTM model saved to {path}")
+        except Exception as e:
+            logger.error(f"Error saving LSTM model: {e}", exc_info=True)
+
+    def load_model(self, path: str):
+        try:
+            state = torch.load(path)
+            self.model.load_state_dict(state['model_state_dict'])
+            self.scaler = state['scaler']
+            self.params = state['params']
+            self.trained_feature_columns_ = state.get('trained_feature_columns')
+            self.model.eval()
+            self.model_path = path
+            logger.info(f"LSTM model loaded from {path}")
+        except FileNotFoundError:
+            logger.error(f"LSTM model file not found at {path}.")
+            self.model = None
+        except Exception as e:
+            logger.error(f"Error loading LSTM model: {e}", exc_info=True)
+            self.model = None
 </code>
 
 kamikaze_komodo/ml_models/price_forecasting/xgboost_classifier_forecaster.py:
@@ -5081,7 +5338,7 @@ kamikaze_komodo/ml_models/regime_detection/__init__.py:
 
 kamikaze_komodo/ml_models/training_pipelines/kmeans_regime_pipeline.py:
 <code>
-# kamikaze_komodo/ml_models/training_pipelines/kmeans_regime_pipeline.py
+# FILE: kamikaze_komodo/ml_models/training_pipelines/kmeans_regime_pipeline.py
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 import os
@@ -5090,7 +5347,7 @@ from kamikaze_komodo.ml_models.regime_detection.kmeans_regime_model import KMean
 from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
 from kamikaze_komodo.data_handling.database_manager import DatabaseManager
 from kamikaze_komodo.app_logger import get_logger
-from kamikaze_komodo.config.settings import settings
+from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
 
 logger = get_logger(__name__)
 
@@ -5108,17 +5365,12 @@ class KMeansRegimeTrainingPipeline:
             logger.warning(f"No parameters found for config section [{model_config_section}]. Using defaults for KMeansRegimeModel if any.")
             self.model_params = {} # Ensure it's a dict
         
-        _model_base_path = self.model_params.get('modelsavepath', 'ml_models/trained_models/regime')
+        _model_base_path = self.model_params.get('modelsavepath', 'ml_models/trained_models')
         _model_filename = self.model_params.get('modelfilename', f"kmeans_regime_{symbol.replace('/', '_').lower()}_{timeframe}.joblib")
         
-        # Determine project root based on this file's location to ensure correct relative pathing
-        # This file is in: kamikaze_komodo/ml_models/training_pipelines/kmeans_regime_pipeline.py
-        # Project root is three levels up from this file's directory
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file_dir)))
-        
+        # FIX: Use the consistent PROJECT_ROOT from settings.py
         if not os.path.isabs(_model_base_path):
-            self.model_save_path_dir = os.path.join(project_root, _model_base_path)
+            self.model_save_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
         else:
             self.model_save_path_dir = _model_base_path
             
@@ -5128,7 +5380,6 @@ class KMeansRegimeTrainingPipeline:
             
         self.model_full_save_path = os.path.join(self.model_save_path_dir, _model_filename)
         
-        # Pass the specific model parameters and the constructed model_full_save_path to KMeansRegimeModel
         self.regime_model = KMeansRegimeModel(model_path=None, params=self.model_params) # Don't load, we are training
         logger.info(f"KMeansRegimeTrainingPipeline initialized for {symbol} ({timeframe}). Model will be saved to: {self.model_full_save_path}")
 
@@ -5142,8 +5393,6 @@ class KMeansRegimeTrainingPipeline:
         historical_bars = db_manager.retrieve_bar_data(self.symbol, self.timeframe, start_date, end_date)
         
         min_bars_for_features = int(self.model_params.get('minbarsfortraining', 100)) 
-        # Consider typical feature lookback for K-Means features (e.g., 20-day vol needs at least 20 bars)
-        # If self.regime_model.features_for_clustering includes 'volatility_X_day', min_bars_for_features should be > X
 
         if not historical_bars or len(historical_bars) < min_bars_for_features:
             logger.info(f"Insufficient data in DB ({len(historical_bars)} bars found, need {min_bars_for_features}). Fetching fresh data for KMeans training...")
@@ -5179,7 +5428,7 @@ class KMeansRegimeTrainingPipeline:
         """
         Fetches data, trains the KMeans regime model, and saves it.
         """
-        days_history = int(self.model_params.get('trainingdayshistory', 1095)) # Default to ~3 years of data
+        days_history = int(self.model_params.get('trainingdayshistory', 1095))
         if days_history <=0:
             logger.error(f"TrainingDaysHistory ({days_history}) must be positive. Cannot run training.")
             return
@@ -5192,37 +5441,13 @@ class KMeansRegimeTrainingPipeline:
 
         logger.info(f"Starting KMeans regime model training using {self.regime_model.__class__.__name__}...")
         
-        # The KMeansRegimeModel's train method handles feature creation and fitting
         self.regime_model.train(historical_df) 
         
-        if self.regime_model.model and self.regime_model.scaler: # Check if model and scaler were successfully created
-            self.regime_model.save_model(self.model_full_save_path) # save_model is in KMeansRegimeModel
+        if self.regime_model.model and self.regime_model.scaler:
+            self.regime_model.save_model(self.model_full_save_path)
             logger.info(f"KMeans regime model training completed and model saved to {self.model_full_save_path}.")
         else:
             logger.error("KMeans regime model training did not produce a valid model or scaler. Model not saved.")
-
-# Example of how it might be run (optional, for standalone testing)
-# async def main():
-#     if not settings:
-#         print("Settings not loaded, cannot run KMeans training pipeline example.")
-#         return
-#     
-#     symbol_to_train = settings.default_symbol
-#     timeframe_to_train = settings.default_timeframe
-#     config_section = "KMeans_Regime_Model"
-
-#     if not settings.config.has_section(config_section):
-#         logger.error(f"Config section [{config_section}] not found. Cannot run training pipeline example.")
-#         return
-#         
-#     logger.info(f"Starting KMeans Regime training pipeline example for {symbol_to_train} ({timeframe_to_train})...")
-#     pipeline = KMeansRegimeTrainingPipeline(symbol=symbol_to_train, timeframe=timeframe_to_train, model_config_section=config_section)
-#     await pipeline.run_training()
-#     logger.info(f"KMeans Regime training pipeline example finished for {symbol_to_train} ({timeframe_to_train}).")
-
-# if __name__ == "__main__":
-#     import asyncio
-#     asyncio.run(main())
 </code>
 
 kamikaze_komodo/ml_models/training_pipelines/lightgbm_pipeline.py:
@@ -5276,7 +5501,7 @@ class LightGBMTrainingPipeline:
         logger.info(f"Attempting to retrieve data from DB for {self.symbol} ({self.timeframe}) from {start_date} to {end_date}")
         historical_bars = db_manager.retrieve_bar_data(self.symbol, self.timeframe, start_date, end_date)
         
-        required_bars = self.model_params.get('min_bars_for_training', 200)
+        required_bars = int(self.model_params.get('minbarsfortraining', 200))
         if not historical_bars or len(historical_bars) < required_bars:
             logger.info(f"Insufficient data in DB ({len(historical_bars)} bars found). Fetching fresh data from exchange...")
             historical_bars = await data_fetcher.fetch_historical_data_for_period(self.symbol, self.timeframe, start_date, end_date)
@@ -5302,12 +5527,12 @@ class LightGBMTrainingPipeline:
         return data_df
 
     async def run_training(self):
-        days_history = int(self.model_params.get('training_days_history', 730))
+        days_history = int(self.model_params.get('trainingdayshistory', 730))
         historical_df = await self.fetch_training_data(days_history=days_history)
         if historical_df.empty:
             logger.error("Cannot run training, no historical data.")
             return
-        target_col_name = self.model_params.get('target_column_name', 'close_change_lag_1_future')
+        target_col_name = self.model_params.get('targetcolumnname', 'close_change_lag_1_future')
         
         feature_cols_str = self.model_params.get('feature_columns')
         feature_columns = [col.strip() for col in feature_cols_str.split(',')] if feature_cols_str else None
@@ -5319,6 +5544,100 @@ class LightGBMTrainingPipeline:
             self.forecaster.save_model(self.model_full_save_path)
         else:
             logger.error("Training did not produce a model. Model not saved.")
+</code>
+
+kamikaze_komodo/ml_models/training_pipelines/lstm_pipeline.py:
+<code>
+# FILE: kamikaze_komodo/ml_models/training_pipelines/lstm_pipeline.py
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+import os
+from kamikaze_komodo.ml_models.price_forecasting.lstm_model import LSTMForecaster
+from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
+from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+from kamikaze_komodo.app_logger import get_logger
+from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
+
+logger = get_logger(__name__)
+
+class LSTMTrainingPipeline:
+    def __init__(self, symbol: str, timeframe: str, model_config_section: str = "LSTM_Forecaster"):
+        if not settings:
+            raise ValueError("Settings not loaded.")
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.model_config_section = model_config_section
+        
+        self.model_params = settings.get_strategy_params(model_config_section)
+        
+        _model_base_path = self.model_params.get('modelsavepath', 'ml_models/trained_models')
+        _model_filename = self.model_params.get('modelfilename', f"lstm_{symbol.replace('/', '_').lower()}_{timeframe}.pth")
+        
+        if not os.path.isabs(_model_base_path):
+            self.model_save_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
+        else:
+            self.model_save_path_dir = _model_base_path
+
+        if not os.path.exists(self.model_save_path_dir):
+            os.makedirs(self.model_save_path_dir, exist_ok=True)
+            
+        self.model_full_save_path = os.path.join(self.model_save_path_dir, _model_filename)
+        
+        self.forecaster = LSTMForecaster(params=self.model_params)
+        logger.info(f"LSTM Training Pipeline initialized. Model will be saved to: {self.model_full_save_path}")
+
+    async def fetch_training_data(self, days_history: int) -> pd.DataFrame:
+        db_manager = DatabaseManager()
+        data_fetcher = DataFetcher()
+        
+        start_date = datetime.now(timezone.utc) - timedelta(days=days_history)
+        end_date = datetime.now(timezone.utc)
+        historical_bars = db_manager.retrieve_bar_data(self.symbol, self.timeframe, start_date, end_date)
+        
+        required_bars = int(self.model_params.get('minbarsfortraining', 200))
+        if not historical_bars or len(historical_bars) < required_bars:
+            logger.info("Insufficient data in DB. Fetching fresh data for LSTM training...")
+            historical_bars = await data_fetcher.fetch_historical_data_for_period(self.symbol, self.timeframe, start_date, end_date)
+            if historical_bars:
+                db_manager.store_bar_data(historical_bars)
+            else:
+                logger.error("Failed to fetch training data for LSTM.")
+                await data_fetcher.close()
+                db_manager.close()
+                return pd.DataFrame()
+        
+        await data_fetcher.close()
+        db_manager.close()
+
+        if not historical_bars:
+            return pd.DataFrame()
+            
+        data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
+        data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
+        data_df.set_index('timestamp', inplace=True)
+        data_df.sort_index(inplace=True)
+        
+        logger.info(f"Fetched {len(data_df)} bars for LSTM training.")
+        return data_df
+
+    async def run_training(self):
+        days_history = int(self.model_params.get('trainingdayshistory', 730))
+        historical_df = await self.fetch_training_data(days_history=days_history)
+
+        if historical_df.empty:
+            logger.error("Cannot run LSTM training, no historical data.")
+            return
+
+        target_col_name = self.model_params.get('targetcolumnname', 'close_change_lag_1_future')
+        feature_cols_str = self.model_params.get('featurecolumns')
+        feature_columns = [col.strip() for col in feature_cols_str.split(',')] if feature_cols_str else None
+        
+        self.forecaster.train(historical_df, target_column=target_col_name, feature_columns=feature_columns)
+        
+        if self.forecaster.model:
+            self.forecaster.save_model(self.model_full_save_path)
+        else:
+            logger.error("LSTM training did not produce a model. Model not saved.")
 </code>
 
 kamikaze_komodo/ml_models/training_pipelines/xgboost_classifier_pipeline.py:
@@ -5416,27 +5735,6 @@ class XGBoostClassifierTrainingPipeline:
             self.forecaster.save_model(self.model_full_save_path)
         else:
             logger.error("XGBoost training did not produce a model. Model not saved.")
-
-async def main_train_xgboost_classifier():
-    if not settings:
-        print("Settings not loaded, cannot run XGBoost Classifier training example.")
-        return
-    
-    symbol_to_train = settings.default_symbol
-    timeframe_to_train = settings.default_timeframe
-    
-    if not settings.config.has_section("XGBoost_Classifier_Forecaster"):
-        logger.error("Config section [XGBoost_Classifier_Forecaster] not found. Cannot run training pipeline.")
-        return
-        
-    logger.info(f"Starting XGBoost Classifier training pipeline for {symbol_to_train} ({timeframe_to_train})...")
-    pipeline = XGBoostClassifierTrainingPipeline(symbol=symbol_to_train, timeframe=timeframe_to_train)
-    await pipeline.run_training()
-    logger.info(f"XGBoost Classifier training pipeline finished for {symbol_to_train} ({timeframe_to_train}).")
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main_train_xgboost_classifier())
 </code>
 
 kamikaze_komodo/ml_models/training_pipelines/__init__.py:
@@ -5633,14 +5931,18 @@ kamikaze_komodo/orchestration/__init__.py:
 
 kamikaze_komodo/portfolio_constructor/asset_allocator.py:
 <code>
-# FILE: kamikaze_komodo/portfolio_constructor/asset_allocator.py
+# kamikaze_komodo/portfolio_constructor/asset_allocator.py
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import linkage, dendrogram
-from scipy.spatial.distance import squareform
+from kamikaze_komodo.core.models import BarData # Or other relevant models
 from kamikaze_komodo.app_logger import get_logger
+
+# For HRP
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
+from scipy.spatial.distance import squareform
+import scipy.stats
 
 logger = get_logger(__name__)
 
@@ -5655,34 +5957,160 @@ class BaseAssetAllocator(ABC):
     @abstractmethod
     def allocate(
         self,
-        assets: List[str],
-        portfolio_value: float,
-        historical_data: Optional[Dict[str, pd.DataFrame]] = None,
-        trade_history: Optional[pd.DataFrame] = None
-    ) -> Dict[str, float]:
+        assets: List[str], # List of available asset symbols
+        portfolio_value: float, # Total current portfolio value
+        historical_data: Optional[Dict[str, pd.DataFrame]] = None, # Dict of DataFrames {symbol: df_ohlcv}
+        trade_history: Optional[pd.DataFrame] = None # For OptimalF
+    ) -> Dict[str, float]: # Target allocation in terms of capital or percentage
         """
         Determines the target allocation for assets.
+        Args:
+            assets (List[str]): List of asset symbols to consider for allocation.
+            portfolio_value (float): Total capital available for allocation.
+            historical_data (Optional[Dict[str, pd.DataFrame]]): Historical OHLCV data for assets.
+            trade_history (Optional[pd.DataFrame]): For OptimalF, needs past trade performance.
         Returns:
             Dict[str, float]: Dictionary mapping asset symbols to target capital allocation.
         """
         pass
 
-class HRPAllocator(BaseAssetAllocator):
+class FixedWeightAssetAllocator(BaseAssetAllocator):
     """
-    Allocates assets using Hierarchical Risk Parity (HRP) by De Prado.
-    Requires historical returns data for all assets in the allocation universe.
+    Allocates assets based on predefined fixed weights.
+    """
+    def __init__(self, target_weights: Dict[str, float], params: Optional[Dict[str, Any]] = None):
+        super().__init__(params)
+        self.target_weights = target_weights
+        if not self.target_weights:
+            logger.warning("FixedWeightAssetAllocator initialized with no target weights.")
+        elif abs(sum(self.target_weights.values()) - 1.0) > 1e-6 and sum(self.target_weights.values()) != 0 : # Allow 0 for no allocation
+            logger.warning(f"Sum of target weights ({sum(self.target_weights.values())}) is not 1.0. Allocations will be normalized or may behave unexpectedly.")
+
+    def allocate(
+        self,
+        assets: List[str],
+        portfolio_value: float,
+        historical_data: Optional[Dict[str, pd.DataFrame]] = None,
+        trade_history: Optional[pd.DataFrame] = None
+    ) -> Dict[str, float]:
+        allocation_targets_capital: Dict[str, float] = {}
+        relevant_target_weights = {asset: self.target_weights.get(asset, 0.0) for asset in assets if asset in self.target_weights}
+        total_weight_for_relevant_assets = sum(relevant_target_weights.values())
+
+        if total_weight_for_relevant_assets == 0:
+            logger.debug("No target weights specified for the given assets or total weight is zero. No allocation.")
+            return {asset: 0.0 for asset in assets}
+
+        for asset in assets:
+            if asset in relevant_target_weights:
+                normalized_weight = relevant_target_weights[asset] / total_weight_for_relevant_assets
+                allocation_targets_capital[asset] = portfolio_value * normalized_weight
+            else:
+                allocation_targets_capital[asset] = 0.0
+        logger.debug(f"FixedWeightAssetAllocator target capital allocation: {allocation_targets_capital}")
+        return allocation_targets_capital
+
+class OptimalFAllocator(BaseAssetAllocator):
+    """
+    Allocates capital based on Vince's Optimal f (Kelly Criterion variant).
+    Optimal f calculation typically needs a series of past trade returns (HPRs - Holding Period Returns).
+    f = ( (R+1) * P - 1 ) / R  where P is win rate, R is avg win / avg loss (payoff ratio).
+    This implementation can use defaults or calculate from provided trade_history.
+    The allocation is per asset/strategy; this allocator itself doesn't combine multiple Optimal f values.
+    It calculates Optimal f for a *single series of trades* that it assumes represents the strategy for the given asset.
     """
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         super().__init__(params)
-        self.linkage_method = self.params.get('hrp_linkage_method', 'single')
+        self.default_win_probability = float(self.params.get('optimalf_default_win_probability', 0.51)) # Slight edge
+        self.default_payoff_ratio = float(self.params.get('optimalf_default_payoff_ratio', 1.1)) # AvgWin / AvgLoss
+        self.kelly_fraction = float(self.params.get('optimalf_kelly_fraction', 0.25)) # Fraction of optimal f to use (e.g., quarter Kelly)
+        self.min_trades_for_stats = int(self.params.get('optimalf_min_trades_for_stats', 20))
+        logger.info(f"OptimalFAllocator initialized. Default WinProb: {self.default_win_probability}, Default Payoff: {self.default_payoff_ratio}, Kelly Fraction: {self.kelly_fraction}, Min Trades: {self.min_trades_for_stats}")
+
+    def _calculate_stats_from_history(self, asset_symbol: str, trade_history: Optional[pd.DataFrame]) -> Optional[Dict[str, float]]:
+        if trade_history is None or trade_history.empty:
+            return None
+    
+        asset_trades = trade_history[trade_history['symbol'] == asset_symbol]
+        if len(asset_trades) < self.min_trades_for_stats:
+            logger.debug(f"Not enough trades ({len(asset_trades)}) for {asset_symbol} to calculate Optimal F stats. Using defaults.")
+            return None
+
+        wins = asset_trades[asset_trades['pnl'] > 0]['pnl']
+        losses = asset_trades[asset_trades['pnl'] < 0]['pnl'].abs() # Losses are positive for payoff ratio calculation
+
+        if len(wins) == 0 or len(losses) == 0: # Avoid division by zero if no wins or no losses
+            logger.debug(f"Not enough diversity in trades (wins: {len(wins)}, losses: {len(losses)}) for {asset_symbol}. Using defaults.")
+            return None
+
+        win_probability = len(wins) / len(asset_trades)
+        average_win = wins.mean()
+        average_loss = losses.mean()
+
+        if average_loss == 0: # Avoid division by zero
+            logger.debug(f"Average loss is zero for {asset_symbol}. Cannot calculate payoff ratio. Using defaults.")
+            return None
+        payoff_ratio = average_win / average_loss
+        return {"win_probability": win_probability, "payoff_ratio": payoff_ratio}
+
+    def allocate(
+        self,
+        assets: List[str],
+        portfolio_value: float,
+        historical_data: Optional[Dict[str, pd.DataFrame]] = None,
+        trade_history: Optional[pd.DataFrame] = None
+    ) -> Dict[str, float]:
+        allocations: Dict[str, float] = {}
+        for asset in assets:
+            stats = self._calculate_stats_from_history(asset, trade_history)
+            win_prob = self.default_win_probability
+            payoff_ratio = self.default_payoff_ratio
+
+            if stats:
+                win_prob = stats['win_probability']
+                payoff_ratio = stats['payoff_ratio']
+                logger.info(f"Optimal F for {asset}: Using calculated WinProb={win_prob:.3f}, PayoffRatio={payoff_ratio:.3f}")
+            else:
+                logger.info(f"Optimal F for {asset}: Using default WinProb={win_prob:.3f}, PayoffRatio={payoff_ratio:.3f}")
+
+            if payoff_ratio <= 0: # Ensure payoff ratio is positive
+                optimal_f = -1.0 # Indicates no bet
+            else:
+                # Kelly formula: f = W - (1-W)/R
+                optimal_f = win_prob - ((1 - win_prob) / payoff_ratio)
+        
+            allocated_capital = 0.0
+            if optimal_f > 0:
+                fraction_to_invest = optimal_f * self.kelly_fraction
+                allocated_capital = portfolio_value * fraction_to_invest
+                logger.info(f"Optimal F for {asset}: f*={optimal_f:.4f}, KellyFraction={self.kelly_fraction:.2f}. Target capital: ${allocated_capital:.2f}")
+            else:
+                logger.info(f"Optimal f for {asset} is not positive ({optimal_f:.4f}). No allocation.")
+            allocations[asset] = allocated_capital
+    
+        # This allocator returns capital per asset based on its own Optimal F.
+        # The sum of these allocations could exceed portfolio_value if not careful,
+        # or if the user intends this for individual strategy sizing rather than portfolio allocation.
+        # For now, it's direct capital per asset. Normalization might be needed by the caller.
+        return allocations
+
+
+class HRPAllocator(BaseAssetAllocator):
+    """
+    Allocates assets using Hierarchical Risk Parity (HRP) by De Prado.
+    Requires historical returns data for assets.
+    """
+    def __init__(self, params: Optional[Dict[str, Any]] = None):
+        super().__init__(params)
+        self.linkage_method = self.params.get('hrp_linkage_method', 'ward') # common: ward, single, complete
         logger.info(f"HRPAllocator initialized. Linkage method: {self.linkage_method}")
 
     def _get_cluster_var(self, cov_matrix: pd.DataFrame, cluster_items: List[int]) -> float:
-        """Calculates variance of a cluster using inverse-variance weighting."""
-        cluster_cov = cov_matrix.iloc[cluster_items, cluster_items]
-        ivp = 1. / np.diag(cluster_cov)
-        ivp /= ivp.sum()
-        cluster_var = np.dot(ivp.T, np.dot(cluster_cov, ivp))
+        """Calculates variance of a cluster."""
+        cluster_cov_matrix = cov_matrix.iloc[cluster_items, cluster_items]
+        parity_w = 1.0 / np.diag(cluster_cov_matrix)
+        parity_w = parity_w / parity_w.sum()
+        cluster_var = np.dot(parity_w, np.dot(cluster_cov_matrix, parity_w))
         return cluster_var
 
     def _get_recursive_bisection(self, sort_ix: List[int], current_weights: np.ndarray, cov_matrix: pd.DataFrame) -> np.ndarray:
@@ -5690,105 +6118,77 @@ class HRPAllocator(BaseAssetAllocator):
         if len(sort_ix) == 1:
             return current_weights
 
+        # Bisection
         mid_point = len(sort_ix) // 2
         cluster1_items = sort_ix[:mid_point]
         cluster2_items = sort_ix[mid_point:]
 
-        var_cluster1 = self._get_cluster_var(cov_matrix, cluster1_items)
-        var_cluster2 = self._get_cluster_var(cov_matrix, cluster2_items)
+        cluster1_var = self._get_cluster_var(cov_matrix, cluster1_items)
+        cluster2_var = self._get_cluster_var(cov_matrix, cluster2_items)
 
-        alpha = 1 - (var_cluster1 / (var_cluster1 + var_cluster2))
+        alpha = cluster2_var / (cluster1_var + cluster2_var) # Allocation factor
 
-        current_weights[cluster1_items] *= alpha
-        current_weights[cluster2_items] *= (1 - alpha)
+        # Allocate weights to clusters
+        for i in cluster1_items:
+            current_weights[i] *= alpha
+        for i in cluster2_items:
+            current_weights[i] *= (1 - alpha)
 
+        # Recursively bisect sub-clusters
         current_weights = self._get_recursive_bisection(cluster1_items, current_weights, cov_matrix)
         current_weights = self._get_recursive_bisection(cluster2_items, current_weights, cov_matrix)
 
         return current_weights
 
-    def allocate(self, assets: List[str], portfolio_value: float, historical_data: Optional[Dict[str, pd.DataFrame]] = None, **kwargs) -> Dict[str, float]:
-        if historical_data is None or len(assets) < 2:
-            logger.warning("HRP requires historical data for at least 2 assets. Falling back to equal weight.")
-            count = len(assets) if assets else 1
-            return {asset: portfolio_value / count for asset in assets}
+    def allocate(
+        self,
+        assets: List[str],
+        portfolio_value: float,
+        historical_data: Optional[Dict[str, pd.DataFrame]] = None,
+        trade_history: Optional[pd.DataFrame] = None
+    ) -> Dict[str, float]:
+        if not historical_data or len(assets) < 2:
+            logger.warning("HRPAllocator requires historical data for at least 2 assets.")
+            # Fallback to equal weight if only one asset or no data
+            if len(assets) == 1: return {assets[0]: portfolio_value}
+            return {asset: portfolio_value / len(assets) if assets else 0.0 for asset in assets}
 
-        returns_df = pd.concat([df['close'].pct_change() for df in historical_data.values()], axis=1)
-        returns_df.columns = assets
-        returns_df.dropna(inplace=True)
+        returns_data = {}
+        for asset in assets:
+            if asset in historical_data and not historical_data[asset].empty:
+                returns_data[asset] = historical_data[asset]['close'].pct_change().dropna()
+            else:
+                logger.warning(f"No historical 'close' data for asset {asset} in HRPAllocator.")
+                # Cannot proceed without data for all assets
+                return {ast: portfolio_value / len(assets) if assets else 0.0 for ast in assets} # Fallback
 
-        if len(returns_df) < 2:
-            logger.warning("Not enough return data for HRP. Falling back to equal weight.")
-            return {asset: portfolio_value / len(assets) for asset in assets}
+        returns_df = pd.DataFrame(returns_data).dropna()
+        if returns_df.shape[0] < 2 or returns_df.shape[1] < 2 : # Need enough observations and assets
+            logger.warning(f"Not enough processed return data for HRP. Shape: {returns_df.shape}")
+            return {asset: portfolio_value / len(assets) if assets else 0.0 for asset in assets}
 
         cov_matrix = returns_df.cov()
         corr_matrix = returns_df.corr()
-        
-        dist_matrix = np.sqrt((1 - corr_matrix) / 2)
-        link = linkage(squareform(dist_matrix), self.linkage_method)
-        
+    
+        # Hierarchical Clustering
+        dist_matrix = np.sqrt(0.5 * (1 - corr_matrix)) # Distance matrix
+        condensed_dist_matrix = squareform(dist_matrix)
+        link = linkage(condensed_dist_matrix, method=self.linkage_method)
+
+        # Quasi-Diagonalization (sorting items by cluster leaves)
         sort_ix = dendrogram(link, no_plot=True)['leaves']
-        sorted_assets = corr_matrix.index[sort_ix].tolist()
-        
-        hrp_weights = pd.Series(1, index=sorted_assets)
-        hrp_weights = self._get_recursive_bisection(list(range(len(sorted_assets))), hrp_weights, cov_matrix)
-        
-        allocations = {asset: portfolio_value * weight for asset, weight in hrp_weights.items()}
+
+        # Recursive Bisection
+        initial_weights = np.ones(len(assets))
+        hrp_weights_array = self._get_recursive_bisection(sort_ix, initial_weights, cov_matrix)
+    
+        # Normalize weights
+        hrp_weights = pd.Series(hrp_weights_array, index=[assets[i] for i in sort_ix])
+        hrp_weights = hrp_weights / hrp_weights.sum() # Ensure they sum to 1
+        hrp_weights = hrp_weights.reindex(assets).fillna(0.0) # Reorder to original asset list and fill NaNs for any missing
+
+        allocations = {asset: portfolio_value * hrp_weights[asset] for asset in assets}
         logger.info(f"HRP Allocator target capital allocation: {allocations}")
-        return allocations
-
-class OptimalFAllocator(BaseAssetAllocator):
-    """
-    Allocates capital based on Vince's Optimal f (a Kelly Criterion variant).
-    This allocator uses historical trade performance to determine the fraction of capital to allocate.
-    """
-    def __init__(self, params: Optional[Dict[str, Any]] = None):
-        super().__init__(params)
-        self.default_win_prob = float(self.params.get('optimalf_default_win_probability', 0.51))
-        self.default_payoff_ratio = float(self.params.get('optimalf_default_payoff_ratio', 1.1))
-        self.kelly_fraction = float(self.params.get('optimalf_kelly_fraction', 0.25))
-        self.min_trades_for_stats = int(self.params.get('optimalf_min_trades_for_stats', 25))
-        logger.info(f"OptimalFAllocator initialized. Kelly Fraction: {self.kelly_fraction}, Min Trades: {self.min_trades_for_stats}")
-
-    def _calculate_stats_from_history(self, asset_symbol: str, trade_history: pd.DataFrame) -> Optional[Dict[str, float]]:
-        asset_trades = trade_history[trade_history['symbol'] == asset_symbol]
-        if len(asset_trades) < self.min_trades_for_stats:
-            return None
-
-        wins = asset_trades[asset_trades['pnl'] > 0]['pnl']
-        losses = asset_trades[asset_trades['pnl'] < 0]['pnl'].abs()
-
-        if len(wins) == 0 or len(losses) == 0 or losses.mean() == 0:
-            return None
-        
-        win_prob = len(wins) / len(asset_trades)
-        payoff_ratio = wins.mean() / losses.mean()
-        return {"win_probability": win_prob, "payoff_ratio": payoff_ratio}
-
-    def allocate(self, assets: List[str], portfolio_value: float, trade_history: Optional[pd.DataFrame] = None, **kwargs) -> Dict[str, float]:
-        allocations: Dict[str, float] = {}
-        for asset in assets:
-            win_prob = self.default_win_prob
-            payoff_ratio = self.default_payoff_ratio
-
-            if trade_history is not None and not trade_history.empty:
-                stats = self._calculate_stats_from_history(asset, trade_history)
-                if stats:
-                    win_prob = stats['win_probability']
-                    payoff_ratio = stats['payoff_ratio']
-
-            optimal_f = win_prob - ((1 - win_prob) / payoff_ratio) if payoff_ratio > 0 else -1.0
-            
-            allocated_capital = 0.0
-            if optimal_f > 0:
-                fraction_to_invest = optimal_f * self.kelly_fraction
-                allocated_capital = portfolio_value * fraction_to_invest
-                logger.info(f"Optimal F for {asset}: f*={optimal_f:.4f}. Target capital: ${allocated_capital:.2f}")
-            else:
-                logger.info(f"Optimal f for {asset} is not positive ({optimal_f:.4f}). No allocation.")
-            
-            allocations[asset] = allocated_capital
-            
         return allocations
 </code>
 
@@ -7613,6 +8013,19 @@ class MLForecasterStrategy(BaseStrategy):
             except Exception as e:
                 logger.error(f"Failed to initialize XGBoostClassifierInference for {symbol} ({timeframe}): {e}", exc_info=True)
                 self.inference_engine = None
+        elif self.forecaster_type.lower() == 'lstm': # Added for LSTM
+            try:
+                from kamikaze_komodo.ml_models.inference_pipelines.lstm_inference import LSTMInference # Attempt import
+                self.inference_engine = LSTMInference(symbol, timeframe, model_config_section=self.model_config_section)
+                if self.inference_engine.forecaster.model is None:
+                    logger.error(f"MLForecasterStrategy: LSTM model for {symbol} ({timeframe}) could not be loaded.")
+                    self.inference_engine = None
+            except ImportError:
+                logger.error(f"LSTMInference not found. Please ensure it's implemented for forecaster_type 'lstm'.")
+                self.inference_engine = None
+            except Exception as e:
+                logger.error(f"Failed to initialize LSTMInference for {symbol} ({timeframe}): {e}", exc_info=True)
+                self.inference_engine = None
         else:
             logger.error(f"Unsupported forecaster_type: {self.forecaster_type} for MLForecasterStrategy.")
 
@@ -7686,7 +8099,7 @@ class MLForecasterStrategy(BaseStrategy):
         df_with_indicators['prediction'] = predictions_list
         df_with_indicators['prediction_confidence'] = prediction_confidences
         
-        if self.forecaster_type.lower() == 'lightgbm': # Assuming regression
+        if self.forecaster_type.lower() == 'lightgbm' or self.forecaster_type.lower() == 'lstm': # Assuming regression
             df_with_indicators['prediction'].fillna(0.0, inplace=True) 
         # For classification, None might mean 'hold' or 'no signal'
 
@@ -7704,7 +8117,7 @@ class MLForecasterStrategy(BaseStrategy):
             close_long_signal = False
             close_short_signal = False
 
-            if self.forecaster_type.lower() == 'lightgbm': # Regression example
+            if self.forecaster_type.lower() in ['lightgbm', 'lstm']: # Regression example
                 if prediction_value is not None:
                     if prediction_value > self.long_threshold: long_signal = True
                     if prediction_value < self.short_threshold: short_signal = True
@@ -7719,9 +8132,9 @@ class MLForecasterStrategy(BaseStrategy):
             
             # Regime adaptation placeholder
             if market_regime is not None:
-                 # Example: if regime is strongly bearish (e.g., regime == 2), suppress longs
-                 # if market_regime == 2 and long_signal: long_signal = False 
-                 pass
+                # Example: if regime is strongly bearish (e.g., regime == 2), suppress longs
+                # if market_regime == 2 and long_signal: long_signal = False 
+                pass
 
 
             # Apply signals based on state
@@ -7750,7 +8163,7 @@ class MLForecasterStrategy(BaseStrategy):
                 elif short_signal and self.enable_shorting and sentiment_ok_for_short:
                     signals.iloc[i] = SignalType.SHORT
                     current_pos_state = SignalType.SHORT
-        
+            
         logger.info(f"Generated MLForecaster signals (vectorized). Longs: {signals.eq(SignalType.LONG).sum()}, Shorts: {signals.eq(SignalType.SHORT).sum()}, CloseLongs: {signals.eq(SignalType.CLOSE_LONG).sum()}, CloseShorts: {signals.eq(SignalType.CLOSE_SHORT).sum()}")
         return signals
 
@@ -7771,6 +8184,9 @@ class MLForecasterStrategy(BaseStrategy):
             return SignalType.HOLD 
 
         min_history_len = int(self.params.get('min_bars_for_prediction', 50)) 
+        if self.forecaster_type == 'lstm':
+            min_history_len = max(min_history_len, int(self.inference_engine.forecaster.params.get('sequencelength', 60)))
+
         if len(self.data_history) < min_history_len:
             logger.debug(f"Not enough history ({len(self.data_history)}/{min_history_len}) for ML prediction on {self.symbol}.")
             return SignalType.HOLD
@@ -7817,7 +8233,7 @@ class MLForecasterStrategy(BaseStrategy):
         close_short_signal_triggered = False
 
         # --- Signal Logic based on forecaster type ---
-        if self.forecaster_type.lower() == 'lightgbm': # Regression
+        if self.forecaster_type.lower() in ['lightgbm', 'lstm']: # Regression
             if prediction_numeric_value > self.long_threshold: long_signal_triggered = True
             if prediction_numeric_value < self.short_threshold: short_signal_triggered = True
             if prediction_numeric_value < self.exit_long_threshold: close_long_signal_triggered = True

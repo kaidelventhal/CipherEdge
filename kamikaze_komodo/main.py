@@ -41,6 +41,7 @@ from kamikaze_komodo.ml_models.training_pipelines.lightgbm_pipeline import Light
 # Phase 6 imports
 from kamikaze_komodo.strategy_framework.strategies.bollinger_band_breakout_strategy import BollingerBandBreakoutStrategy
 from kamikaze_komodo.strategy_framework.strategies.pair_trading_strategy import PairTradingStrategy
+from kamikaze_komodo.ml_models.training_pipelines.lstm_pipeline import LSTMTrainingPipeline
 from kamikaze_komodo.ml_models.training_pipelines.xgboost_classifier_pipeline import XGBoostClassifierTrainingPipeline
 from kamikaze_komodo.ml_models.training_pipelines.kmeans_regime_pipeline import KMeansRegimeTrainingPipeline
 
@@ -643,8 +644,8 @@ async def run_phase6_demonstration():
         logger.info(f"Running EWMAC (Shorting) backtest on {symbol}...")
         trades_ewmac, final_pf_ewmac, equity_ewmac = backtest_engine_ewmac.run()
         pa_ewmac = PerformanceAnalyzer(trades_ewmac, initial_capital, final_pf_ewmac['final_portfolio_value'], equity_ewmac,
-                                         risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
-                                         annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
+                                        risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
+                                        annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
         metrics_ewmac = pa_ewmac.calculate_metrics()
         pa_ewmac.print_summary(metrics_ewmac)
     else:
@@ -677,8 +678,8 @@ async def run_phase6_demonstration():
         logger.info(f"Running BollingerBandBreakout backtest on {symbol}...")
         trades_bb, final_pf_bb, equity_bb = backtest_engine_bb.run()
         pa_bb = PerformanceAnalyzer(trades_bb, initial_capital, final_pf_bb['final_portfolio_value'], equity_bb,
-                                      risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
-                                      annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
+                                        risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
+                                        annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
         metrics_bb = pa_bb.calculate_metrics()
         pa_bb.print_summary(metrics_bb)
     else:
@@ -735,8 +736,8 @@ async def run_phase6_demonstration():
                 trades_pair, final_pf_pair, equity_pair = backtest_engine_pair.run()
                 
                 pa_pair = PerformanceAnalyzer(trades_pair, initial_capital, final_pf_pair['final_portfolio_value'], equity_pair,
-                                                  risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
-                                                  annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
+                                                risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
+                                                annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
                 metrics_pair = pa_pair.calculate_metrics()
                 pa_pair.print_summary(metrics_pair)
             else:
@@ -776,8 +777,8 @@ async def run_phase6_demonstration():
                 logger.info(f"Running MLForecasterStrategy (XGBoost) backtest on {symbol}...")
                 trades_ml_xgb, final_pf_ml_xgb, equity_ml_xgb = backtest_engine_ml_xgb.run()
                 pa_ml_xgb = PerformanceAnalyzer(trades_ml_xgb, initial_capital, final_pf_ml_xgb['final_portfolio_value'], equity_ml_xgb,
-                                                  risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
-                                                  annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
+                                                risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
+                                                annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor')))
                 metrics_ml_xgb = pa_ml_xgb.calculate_metrics()
                 pa_ml_xgb.print_summary(metrics_ml_xgb)
             else:
@@ -787,8 +788,68 @@ async def run_phase6_demonstration():
     else:
         logger.warning("XGBoost_Classifier_Forecaster section not in config. Skipping XGBoost demo.")
 
+    # --- 5. Train and Backtest MLForecasterStrategy with LSTM ---
+    logger.info("--- Starting Training & Backtest for MLForecasterStrategy with LSTM (Phase 6 Demo) ---")
+    if settings.config.has_section("LSTM_Forecaster"):
+        try:
+            lstm_train_pipeline = LSTMTrainingPipeline(symbol=symbol, timeframe=timeframe)
+            await lstm_train_pipeline.run_training()
 
-    # --- K-Means Regime Model Training (separate from strategy for this demo) ---
+            ml_lstm_params = settings.get_strategy_params("MLForecaster_Strategy")
+            # Override params for LSTM
+            ml_lstm_params['forecastertype'] = 'lstm'
+            ml_lstm_params['modelconfigsection'] = 'LSTM_Forecaster'
+
+            ml_lstm_strategy = MLForecasterStrategy(symbol=symbol, timeframe=timeframe, params=ml_lstm_params)
+
+            if ml_lstm_strategy.inference_engine and ml_lstm_strategy.inference_engine.forecaster.model:
+                historical_bars_ml_lstm = db_manager.retrieve_bar_data(symbol, timeframe, start_date, end_date)
+                
+                # Get sequence length from LSTM config for min_bars calculation
+                lstm_config_params = settings.get_strategy_params("LSTM_Forecaster")
+                min_bars_lstm = max(
+                    int(ml_lstm_params.get('min_bars_for_prediction', 50)),
+                    int(lstm_config_params.get("sequencelength", 60)) + 5
+                )
+
+                if not historical_bars_ml_lstm or len(historical_bars_ml_lstm) < min_bars_lstm:
+                    logger.info(f"Fetching fresh data for ML (LSTM) backtest (need ~{min_bars_lstm} bars)...")
+                    historical_bars_ml_lstm = await data_fetcher.fetch_historical_data_for_period(symbol, timeframe, start_date, end_date)
+                    if historical_bars_ml_lstm: db_manager.store_bar_data(historical_bars_ml_lstm)
+
+                if historical_bars_ml_lstm and len(historical_bars_ml_lstm) >= min_bars_lstm:
+                    data_df_ml_lstm = pd.DataFrame([bar.model_dump() for bar in historical_bars_ml_lstm])
+                    data_df_ml_lstm['timestamp'] = pd.to_datetime(data_df_ml_lstm['timestamp'])
+                    data_df_ml_lstm.set_index('timestamp', inplace=True)
+
+                    backtest_engine_ml_lstm = BacktestingEngine(
+                        data_feed_df=data_df_ml_lstm, strategy=ml_lstm_strategy, initial_capital=initial_capital,
+                        commission_bps=commission_bps, slippage_bps=slippage_bps, funding_rate_annualized=funding_rate_annualized,
+                        position_sizer=main_position_sizer, stop_manager=main_stop_manager,
+                        sentiment_data_df=sentiment_df
+                    )
+                    logger.info(f"Running MLForecasterStrategy (LSTM) backtest on {symbol}...")
+                    trades_ml_lstm, final_pf_ml_lstm, equity_ml_lstm = backtest_engine_ml_lstm.run()
+                    
+                    pa_ml_lstm = PerformanceAnalyzer(
+                        trades=trades_ml_lstm, initial_capital=initial_capital, final_capital=final_pf_ml_lstm['final_portfolio_value'], 
+                        equity_curve_df=equity_ml_lstm,
+                        risk_free_rate_annual=float(settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual')),
+                        annualization_factor=int(settings.config.get('BacktestingPerformance', 'AnnualizationFactor'))
+                    )
+                    metrics_ml_lstm = pa_ml_lstm.calculate_metrics()
+                    pa_ml_lstm.print_summary(metrics_ml_lstm)
+                else:
+                    logger.error(f"Not enough data for ML (LSTM) backtest ({len(historical_bars_ml_lstm if historical_bars_ml_lstm else [])} bars). Skipping.")
+            else:
+                logger.error("MLForecasterStrategy (LSTM) model not loaded after training. Skipping backtest.")
+        except Exception as e_lstm:
+             logger.error(f"An error occurred during the LSTM demo: {e_lstm}", exc_info=True)
+    else:
+        logger.warning("LSTM_Forecaster section not in config. Skipping LSTM demo.")
+
+
+    # --- 6. K-Means Regime Model Training (separate from strategy for this demo) ---
     if settings.config.has_section("KMeans_Regime_Model"):
         logger.info("--- Running K-Means Regime Model Training (Phase 6 Demo) ---")
         kmeans_pipeline = KMeansRegimeTrainingPipeline(symbol=symbol, timeframe=timeframe)
@@ -845,7 +906,7 @@ if __name__ == "__main__":
 
         model_dir_from_config = "ml_models/trained_models"
         if settings and settings.config.has_section("LightGBM_Forecaster") and settings.config.get("LightGBM_Forecaster", "ModelSavePath", fallback=None):
-             model_dir_from_config = settings.config.get("LightGBM_Forecaster", "ModelSavePath")
+                model_dir_from_config = settings.config.get("LightGBM_Forecaster", "ModelSavePath")
         
         asyncio.run(main())
     except KeyboardInterrupt:

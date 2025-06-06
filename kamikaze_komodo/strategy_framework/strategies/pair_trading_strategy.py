@@ -91,7 +91,8 @@ class PairTradingStrategy(BaseStrategy):
         # OLS regression: asset1 = hedge_ratio * asset2 + const
         model = sm.OLS(close_asset1, sm.add_constant(close_asset2, prepend=True))
         results = model.fit()
-        self.hedge_ratio = results.params[1]
+        # FIX: Use .iloc for explicit positional access to fix FutureWarning
+        self.hedge_ratio = results.params.iloc[1]
 
         spread = close_asset1 - self.hedge_ratio * close_asset2
         

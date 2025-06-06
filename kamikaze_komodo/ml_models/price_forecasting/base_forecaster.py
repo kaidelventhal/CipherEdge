@@ -1,4 +1,4 @@
-# kamikaze_komodo/ml_models/price_forecasting/base_forecaster.py
+# FILE: kamikaze_komodo/ml_models/price_forecasting/base_forecaster.py
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Optional, Dict, Any, Union
@@ -12,8 +12,9 @@ class BasePriceForecaster(ABC):
         self.model_path = model_path
         self.params = params if params is not None else {}
         self.model: Any = None
-        if model_path:
-            self.load_model(model_path)
+        # FIX: The call to load_model is removed from the base class.
+        # Subclasses are now responsible for calling it at the appropriate time
+        # (i.e., after the model architecture has been defined).
         logger.info(f"{self.__class__.__name__} initialized with model_path: {model_path}, params: {self.params}")
     @abstractmethod
     def train(self, historical_data: pd.DataFrame, target_column: str = 'close', feature_columns: Optional[list] = None):

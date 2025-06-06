@@ -23,7 +23,6 @@ class LightGBMTrainingPipeline:
         _model_base_path = self.model_params.get('modelsavepath', 'ml_models/trained_models')
         _model_filename = self.model_params.get('modelfilename', f"lgbm_{symbol.replace('/', '_').lower()}_{timeframe}.joblib")
         
-        # FIX: Use the consistent PROJECT_ROOT from settings.py
         if not os.path.isabs(_model_base_path):
             self.model_save_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
         else:
@@ -69,7 +68,32 @@ class LightGBMTrainingPipeline:
         data_df.set_index('timestamp', inplace=True)
         data_df.sort_index(inplace=True)
         
-        logger.info(f"Fetched {len(data_df)} bars for training {self.symbol} ({self.timeframe}).")
+        if settings.enable_sentiment_analysis and settings.simulated_sentiment_data_path:
+            sentiment_path = settings.simulated_sentiment_data_path
+            if os.path.exists(sentiment_path):
+                logger.info(f"Loading sentiment data from {sentiment_path} to merge for training.")
+                sentiment_df = pd.read_csv(sentiment_path, parse_dates=['timestamp'], index_col='timestamp')
+                if not sentiment_df.index.tz:
+                    sentiment_df.index = sentiment_df.index.tz_localize('UTC')
+                else:
+                    sentiment_df.index = sentiment_df.index.tz_convert('UTC')
+                
+                # --- FIX: Drop existing sentiment_score column to prevent overlap error ---
+                if 'sentiment_score' in data_df.columns:
+                    data_df = data_df.drop(columns=['sentiment_score'])
+                
+                data_df = data_df.join(sentiment_df['sentiment_score'], how='left')
+                data_df['sentiment_score'].ffill(inplace=True)
+                data_df['sentiment_score'].fillna(0.0, inplace=True)
+                logger.info("Successfully merged sentiment data into the training set.")
+            else:
+                logger.warning(f"Sentiment data file not found at {sentiment_path}. Training without sentiment feature.")
+                data_df['sentiment_score'] = 0.0
+        else:
+            logger.info("Sentiment analysis not enabled or no data path provided. Training without sentiment feature.")
+            data_df['sentiment_score'] = 0.0
+        
+        logger.info(f"Fetched and prepared {len(data_df)} bars for training {self.symbol} ({self.timeframe}).")
         return data_df
 
     async def run_training(self):
