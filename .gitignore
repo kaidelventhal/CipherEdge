@@ -1,0 +1,85 @@
+# Python Bytecode and Caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+# If your venv is directly inside kamikaze_komodo package:
+kamikaze_komodo/.venv/
+# If you might create other venvs at the root:
+# .venv/
+# venv/
+# ENV/
+# env/
+# .env
+
+# Database files
+kamikaze_komodo_data.db
+
+# Log files and directories
+logs/
+*.log
+# If logs are also generated inside the package dir (adjust if needed)
+kamikaze_komodo/logs/ 
+
+# Secrets / Sensitive Configuration
+# IMPORTANT: Make sure secrets.ini is NEVER committed
+#kamikaze_komodo/config/secrets.ini
+
+# IDE / Editor specific files
+.vscode/
+.idea/
+*.project
+*.classpath
+*.cproject
+.project
+*.launch
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# IPython Notebook checkpoints
+.ipynb_checkpoints
+
+# Coverage data
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Temporary files
+*.swp
+*~
+
+.venv/

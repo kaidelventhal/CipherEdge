@@ -1,0 +1,41 @@
+# Core Data & Utility
+pandas
+pandas-ta
+numpy
+pydantic
+python-dotenv
+httpx
+feedparser # For news scraping
+google-cloud-aiplatform # For Vertex AI
+
+# Exchange Interaction
+ccxt
+
+# Machine Learning - General
+scikit-learn
+joblib
+
+# Machine Learning - Specific Models/Pipelines
+lightgbm
+xgboost
+statsmodels # Corrected name
+
+# Langchain & AI
+langchain
+langchain-google-vertexai
+newspaper3k # For news scraping
+
+# Optimization
+optuna
+
+# Scheduling
+apscheduler
+
+# Advanced Portfolio (HRP)
+scipy
+
+lxml[html_clean]
+
+# Optional AI Agent Modules (add if you use these features)
+# browser-use
+# jeepney
