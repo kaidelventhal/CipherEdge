@@ -32,10 +32,23 @@ class BarData(BaseModel):
     # Phase 6: Market Regime
     market_regime: Optional[int] = Field(None, description="Market regime identified by a model (e.g., 0, 1, 2)")
 
+    # Phase 7, P2: Funding Rate
+    funding_rate: Optional[float] = Field(None, description="The funding rate for the perpetual future at this timestamp.")
+
 
     class Config:
-        frozen = False # Allow modification by strategies/engine (e.g. to add ATR or predictions)
-        
+        frozen = False # Allow modification by strategies/engine
+
+class FundingRate(BaseModel):
+    """
+    Represents a single funding rate data point for a perpetual future.
+    """
+    symbol: str
+    timestamp: datetime
+    funding_rate: float
+    mark_price: Optional[float] = None
+
+
 class Order(BaseModel):
     # ... (no changes from existing)
     id: str = Field(..., description="Unique order identifier (from exchange or internal)")

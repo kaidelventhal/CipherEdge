@@ -137,6 +137,41 @@ class KMeansRegimeModel:
             logger.error(f"Error during KMeans regime prediction: {e}", exc_info=True)
             return None
 
+    def predict_series(self, data: pd.DataFrame) -> Optional[pd.Series]:
+        """
+        Predicts the regime for an entire DataFrame of historical data.
+        Returns a Series of regimes aligned with the input DataFrame's index.
+        """
+        if self.model is None or self.scaler is None:
+            logger.error("KMeans model or scaler not trained/loaded. Cannot predict regime series.")
+            return None
+        
+        feature_df = self.create_features(data)
+        if feature_df.empty:
+            logger.warning("No features could be created from data for KMeans series prediction.")
+            return pd.Series(np.nan, index=data.index)
+
+        # Align feature_df with original data index to handle NaNs from feature creation
+        aligned_feature_df = feature_df.reindex(data.index)
+        
+        # We can only predict where we have features. Get the valid indices.
+        valid_indices = aligned_feature_df.dropna().index
+        if valid_indices.empty:
+            logger.warning("No valid feature rows to predict on.")
+            return pd.Series(np.nan, index=data.index)
+
+        scaled_features = self.scaler.transform(aligned_feature_df.loc[valid_indices])
+        
+        try:
+            regimes = self.model.predict(scaled_features)
+            # Create a series with the predictions, indexed correctly
+            regime_series = pd.Series(regimes, index=valid_indices)
+            # Reindex to match the original data's index, and forward-fill missing values
+            return regime_series.reindex(data.index).ffill()
+        except Exception as e:
+            logger.error(f"Error during KMeans regime series prediction: {e}", exc_info=True)
+            return None
+
     def save_model(self, path: Optional[str] = None):
         _path = path or self.model_path
         if self.model is None or self.scaler is None:

@@ -3,7 +3,7 @@
 # Phase 6: Minor modification to bar_data table to include market_regime.
 import sqlite3
 from typing import List, Optional, Dict, Any # Added Dict, Any
-from kamikaze_komodo.core.models import BarData, NewsArticle # Added NewsArticle
+from kamikaze_komodo.core.models import BarData, NewsArticle, FundingRate # Added FundingRate
 from kamikaze_komodo.app_logger import get_logger
 from datetime import datetime, timezone, UTC 
 import json # For storing dicts/lists like related_symbols or key_themes
@@ -38,6 +38,7 @@ class DatabaseManager:
         try:
             cursor = self.conn.cursor()
             # BarData Table
+            # Add funding_rate column
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS bar_data (
                     timestamp TEXT NOT NULL, 
@@ -50,10 +51,21 @@ class DatabaseManager:
                     volume REAL NOT NULL,
                     atr REAL, 
                     sentiment_score REAL,
-                    prediction_value REAL, -- Phase 5
-                    prediction_confidence REAL, -- Phase 5
-                    market_regime INTEGER, -- Phase 6
+                    prediction_value REAL,
+                    prediction_confidence REAL,
+                    market_regime INTEGER,
+                    funding_rate REAL,
                     PRIMARY KEY (timestamp, symbol, timeframe)
+                )
+            """)
+            # Funding Rate Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS funding_rates (
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    funding_rate REAL NOT NULL,
+                    mark_price REAL,
+                    PRIMARY KEY (timestamp, symbol)
                 )
             """)
             # NewsArticle Table
@@ -75,17 +87,8 @@ class DatabaseManager:
                     raw_llm_response TEXT 
                 )
             """)
-            # Trades Table (Example for future use)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, entry_order_id TEXT, exit_order_id TEXT,
-                    side TEXT NOT NULL, entry_price REAL NOT NULL, exit_price REAL, amount REAL NOT NULL,
-                    entry_timestamp TEXT NOT NULL, exit_timestamp TEXT, pnl REAL, pnl_percentage REAL,
-                    commission REAL DEFAULT 0.0, result TEXT, notes TEXT, custom_fields TEXT
-                )
-            """)
             self.conn.commit()
-            logger.info("Tables checked/created successfully (timestamps as TEXT, complex fields as JSON TEXT).")
+            logger.info("Tables checked/created successfully.")
         except sqlite3.Error as e:
             logger.error(f"Error creating tables: {e}")
 
@@ -118,15 +121,15 @@ class DatabaseManager:
                     self._to_iso_format(bd.timestamp), bd.symbol, bd.timeframe,
                     bd.open, bd.high, bd.low, bd.close, bd.volume,
                     bd.atr, bd.sentiment_score,
-                    bd.prediction_value, bd.prediction_confidence, # Phase 5
-                    bd.market_regime # Phase 6
+                    bd.prediction_value, bd.prediction_confidence,
+                    bd.market_regime, bd.funding_rate
                 ) for bd in bar_data_list
             ]
             cursor.executemany("""
                 INSERT OR REPLACE INTO bar_data 
                 (timestamp, symbol, timeframe, open, high, low, close, volume, atr, sentiment_score,
-                 prediction_value, prediction_confidence, market_regime)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
+                 prediction_value, prediction_confidence, market_regime, funding_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
             """, data_to_insert) 
             self.conn.commit()
             logger.info(f"Stored/Replaced {len(data_to_insert)} bar data entries. ({cursor.rowcount} affected)")
@@ -138,7 +141,7 @@ class DatabaseManager:
         if not self.conn: logger.error("No DB connection for bar data."); return []
         try:
             cursor = self.conn.cursor()
-            query = "SELECT timestamp, open, high, low, close, volume, symbol, timeframe, atr, sentiment_score, prediction_value, prediction_confidence, market_regime FROM bar_data WHERE symbol = ? AND timeframe = ?"
+            query = "SELECT * FROM bar_data WHERE symbol = ? AND timeframe = ?"
             params = [symbol, timeframe]
             if start_date: query += " AND timestamp >= ?"; params.append(self._to_iso_format(start_date))
             if end_date: query += " AND timestamp <= ?"; params.append(self._to_iso_format(end_date))
@@ -146,30 +149,55 @@ class DatabaseManager:
 
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            bar_data_list = []
-            for row in rows:
-                dt_object = self._from_iso_format(row['timestamp'])
-                if not dt_object: continue
-                bar_data_list.append(BarData(
-                    timestamp=dt_object, open=row['open'], high=row['high'], low=row['low'],
-                    close=row['close'], volume=row['volume'], symbol=row['symbol'], timeframe=row['timeframe'],
-                    atr=row['atr'], sentiment_score=row['sentiment_score'],
-                    prediction_value=row['prediction_value'], prediction_confidence=row['prediction_confidence'], # Phase 5
-                    market_regime=row['market_regime'] # Phase 6
-                ))
+            bar_data_list = [BarData(**row) for row in (dict(row) for row in rows)]
             logger.info(f"Retrieved {len(bar_data_list)} bar data entries for {symbol} ({timeframe}).")
             return bar_data_list
         except Exception as e:
             logger.error(f"Error retrieving bar data for {symbol} ({timeframe}): {e}", exc_info=True); return []
 
+    def store_funding_rates(self, funding_rates: List[FundingRate]):
+        if not self.conn: logger.error("No DB connection for funding rates."); return False
+        if not funding_rates: logger.info("No funding rates to store."); return True
+        try:
+            cursor = self.conn.cursor()
+            data_to_insert = [
+                (self._to_iso_format(fr.timestamp), fr.symbol, fr.funding_rate, fr.mark_price) for fr in funding_rates
+            ]
+            cursor.executemany("""
+                INSERT OR REPLACE INTO funding_rates
+                (timestamp, symbol, funding_rate, mark_price)
+                VALUES (?, ?, ?, ?)
+            """, data_to_insert)
+            self.conn.commit()
+            logger.info(f"Stored/Replaced {len(data_to_insert)} funding rate entries.")
+            return True
+        except Exception as e:
+            logger.error(f"Error storing funding rates: {e}", exc_info=True); return False
+
+    def retrieve_funding_rates(self, symbol: str, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> List[FundingRate]:
+        if not self.conn: logger.error("No DB connection for funding rates."); return []
+        try:
+            cursor = self.conn.cursor()
+            query = "SELECT * FROM funding_rates WHERE symbol = ?"
+            params = [symbol]
+            if start_date: query += " AND timestamp >= ?"; params.append(self._to_iso_format(start_date))
+            if end_date: query += " AND timestamp <= ?"; params.append(self._to_iso_format(end_date))
+            query += " ORDER BY timestamp ASC"
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            rates_list = [FundingRate(**row) for row in (dict(row) for row in rows)]
+            logger.info(f"Retrieved {len(rates_list)} funding rate entries for {symbol}.")
+            return rates_list
+        except Exception as e:
+            logger.error(f"Error retrieving funding rates for {symbol}: {e}", exc_info=True); return []
+    
     def store_news_articles(self, articles: List[NewsArticle]):
         if not self.conn: logger.error("No DB connection for news articles."); return False
         if not articles: logger.info("No news articles to store."); return True
         try:
             cursor = self.conn.cursor()
-            data_to_insert = []
-            for article in articles:
-                data_to_insert.append((
+            data_to_insert = [
+                (
                     article.id, article.url, article.title,
                     self._to_iso_format(article.publication_date),
                     self._to_iso_format(article.retrieval_date),
@@ -179,7 +207,8 @@ class DatabaseManager:
                     json.dumps(article.key_themes) if article.key_themes else None,
                     json.dumps(article.related_symbols) if article.related_symbols else None,
                     json.dumps(article.raw_llm_response) if article.raw_llm_response else None
-                ))
+                ) for article in articles
+            ]
             
             cursor.executemany("""
                 INSERT OR REPLACE INTO news_articles
@@ -200,10 +229,10 @@ class DatabaseManager:
             query = "SELECT * FROM news_articles WHERE 1=1"
             params = []
 
-            if symbol: # Search in related_symbols (requires LIKE or a better FTS setup)
+            if symbol:
                 query += " AND related_symbols LIKE ?"
-                params.append(f'%"{symbol}"%') # Simple JSON array search, not very efficient
-            if start_date: # Based on publication_date
+                params.append(f'%"{symbol}"%')
+            if start_date:
                 query += " AND publication_date >= ?"
                 params.append(self._to_iso_format(start_date))
             if end_date:
@@ -218,19 +247,7 @@ class DatabaseManager:
 
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-            articles_list = []
-            for row in rows:
-                articles_list.append(NewsArticle(
-                    id=row['id'], url=row['url'], title=row['title'],
-                    publication_date=self._from_iso_format(row['publication_date']),
-                    retrieval_date=self._from_iso_format(row['retrieval_date']),
-                    source=row['source'], content=row['content'], summary=row['summary'],
-                    sentiment_score=row['sentiment_score'], sentiment_label=row['sentiment_label'],
-                    sentiment_confidence=row['sentiment_confidence'],
-                    key_themes=json.loads(row['key_themes']) if row['key_themes'] else [],
-                    related_symbols=json.loads(row['related_symbols']) if row['related_symbols'] else [],
-                    raw_llm_response=json.loads(row['raw_llm_response']) if row['raw_llm_response'] else None
-                ))
+            articles_list = [NewsArticle(**dict(row)) for row in rows]
             logger.info(f"Retrieved {len(articles_list)} news articles with given criteria.")
             return articles_list
         except Exception as e:

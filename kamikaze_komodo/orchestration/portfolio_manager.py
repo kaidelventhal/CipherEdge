@@ -1,173 +1,150 @@
 # FILE: kamikaze_komodo/orchestration/portfolio_manager.py
 import pandas as pd
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Type
 
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings
-from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
-from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
 from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager
 from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
-from kamikaze_komodo.portfolio_constructor.asset_allocator import HRPAllocator, BaseAssetAllocator
+from kamikaze_komodo.strategy_framework.strategies.bollinger_band_breakout_strategy import BollingerBandBreakoutStrategy
+from kamikaze_komodo.strategy_framework.strategies.funding_rate_arb_strategy import FundingRateArbStrategy
+from kamikaze_komodo.strategy_framework.strategies.ml_forecaster_strategy import MLForecasterStrategy
+from kamikaze_komodo.portfolio_constructor.asset_allocator import HRPAllocator, BaseAssetAllocator, FixedWeightAssetAllocator
 from kamikaze_komodo.portfolio_constructor.rebalancer import BasicRebalancer
 from kamikaze_komodo.exchange_interaction.exchange_api import ExchangeAPI
-from kamikaze_komodo.core.models import BarData, PortfolioSnapshot, Order
+from kamikaze_komodo.core.models import BarData, PortfolioSnapshot
 from kamikaze_komodo.core.enums import SignalType
 
 logger = get_logger(__name__)
+
+# Mapping of strategy names in config to their respective classes
+STRATEGY_CLASS_MAP: Dict[str, Type[BaseStrategy]] = {
+    "EWMAC_Strategy": EWMACStrategy,
+    "BollingerBandBreakout_Strategy": BollingerBandBreakoutStrategy,
+    "FundingRateArb_Strategy": FundingRateArbStrategy,
+    "MLForecaster_Strategy": MLForecasterStrategy,
+}
+
 
 class PortfolioManager:
     """
     The central orchestrator for the trading bot.
     Manages data, strategies, and execution for a portfolio of assets.
-    This class is designed to be used by both the live trading scheduler and the backtesting engine.
     """
 
     def __init__(self, exchange_api: Optional[Any] = None):
         if not settings:
             raise ValueError("Settings not loaded.")
         
-        # Determine operating mode and exchange connection
-        if exchange_api:
-            self.exchange_api = exchange_api
-            self.is_backtest = True
-            logger.info("PortfolioManager initialized in backtesting mode.")
-        else:
-            self.exchange_api = ExchangeAPI()
-            self.is_backtest = False
-            logger.info("PortfolioManager initialized in live trading mode.")
+        self.exchange_api = exchange_api if exchange_api else ExchangeAPI()
+        self.is_backtest = exchange_api is not None
         
-        # Load portfolio configuration
-        portfolio_config = settings.get_strategy_params('Portfolio')
-        self.trading_universe_str = portfolio_config.get('tradinguniverse', settings.default_symbol)
-        self.trading_universe: List[str] = [s.strip() for s in self.trading_universe_str.split(',')]
+        self.portfolio_config = settings.get_strategy_params('Portfolio')
+        self.trading_universe: List[str] = [s.strip() for s in self.portfolio_config.get('tradinguniverse', '').split(',')]
         self.timeframe = settings.default_timeframe
         
         logger.info(f"Managing portfolio for universe: {self.trading_universe}")
 
-        # Initialize core components
-        self.db_manager = DatabaseManager()
         self.strategy_manager = StrategyManager()
         self._load_strategies()
 
-        # Initialize portfolio constructor components
-        # TODO: Dynamic loading of allocator and rebalancer
-        self.asset_allocator: BaseAssetAllocator = HRPAllocator()
-        self.rebalancer = BasicRebalancer(params=settings.get_strategy_params('Rebalancer'))
+        self._initialize_constructor_components(self.portfolio_config)
 
-        # Portfolio state
-        self.portfolio_snapshot = PortfolioSnapshot(total_value_usd=0, cash_balance_usd=0) # Will be updated
+        self.portfolio_snapshot = PortfolioSnapshot(
+            total_value_usd=10000.0, # Initialized from config now
+            cash_balance_usd=10000.0,
+            positions={asset: 0.0 for asset in self.trading_universe}
+        )
 
     def _load_strategies(self):
-        """
-        Loads and initializes strategies for assets in the trading universe.
-        This is a placeholder for a more dynamic implementation based on a config file.
-        """
-        logger.info("Loading strategies for the trading universe...")
-        for asset in self.trading_universe:
-            # For this phase, we assume a single strategy type (e.g., EWMAC) applies to all assets.
-            strategy_params = settings.get_strategy_params('EWMAC_Strategy')
-            strategy = EWMACStrategy(
-                symbol=asset, 
-                timeframe=self.timeframe, 
-                params=strategy_params
-            )
-            self.strategy_manager.add_strategy(strategy)
-
-    async def _update_portfolio_state(self):
-        """Fetches and updates the current portfolio state from the exchange."""
-        logger.info("Updating portfolio state from exchange...")
-        balance = await self.exchange_api.fetch_balance()
-        # This is a simplified view. A real implementation needs to handle different quote currencies,
-        # margin, futures PnL, etc. For now, we assume a USD-based portfolio.
-        # It also needs to fetch current positions. CCXT's fetchBalance can often do this.
-        
-        # Placeholder logic
-        cash = balance.get('USD', {}).get('free', 0.0)
-        total_value = balance.get('USD', {}).get('total', 0.0)
-        positions = {} # Needs to be populated from balance info
-        
-        self.portfolio_snapshot = PortfolioSnapshot(
-            total_value_usd=total_value,
-            cash_balance_usd=cash,
-            positions=positions
-        )
-        logger.info(f"Portfolio state updated: Total Value=${total_value:.2f}, Cash=${cash:.2f}")
-
-    async def run_cycle(self, historical_data_for_cycle: Optional[Dict[str, pd.DataFrame]] = None):
-        """
-        The main trading loop. Can be triggered by a scheduler for live trading
-        or by the backtesting engine for simulation.
-
-        Args:
-            historical_data_for_cycle: In backtesting, this provides the complete historical data up to the
-                                       current simulation time. In live trading, this is None.
-        """
-        logger.info("Starting new portfolio management cycle.")
-
-        # 1. Update Portfolio State
-        if not self.is_backtest:
-            await self._update_portfolio_state()
-
-        # 2. Fetch/Update Data
-        # In a live run, fetch latest data. In a backtest, data is provided.
-        current_data: Dict[str, BarData] = {}
-        all_asset_data: Dict[str, pd.DataFrame] = {}
-
-        if self.is_backtest and historical_data_for_cycle:
-             all_asset_data = historical_data_for_cycle
-             for asset, df in all_asset_data.items():
-                 if not df.empty:
-                     latest_row = df.iloc[-1]
-                     # The row from the dataframe contains all necessary fields from the original
-                     # BarData object (except timestamp, which is now the index).
-                     current_data[asset] = BarData(timestamp=df.index[-1], **latest_row.to_dict())
-        else: # Live trading mode
-            # TODO: Implement live data fetching logic
-            logger.warning("Live data fetching not yet implemented in PortfolioManager.run_cycle.")
+        logger.info("Dynamically loading strategies from config...")
+        active_strategies_str = self.portfolio_config.get('activestrategies', '')
+        if not active_strategies_str:
+            logger.warning("No 'ActiveStrategies' defined in [Portfolio] section of config.")
             return
 
-        # 3. Generate Signals
+        active_strategy_names = [s.strip() for s in active_strategies_str.split(',')]
+        
+        for strategy_name in active_strategy_names:
+            strategy_class = STRATEGY_CLASS_MAP.get(strategy_name)
+            if strategy_class:
+                strategy_params = settings.get_strategy_params(strategy_name)
+                for asset in self.trading_universe:
+                    strategy_instance = strategy_class(symbol=asset, timeframe=self.timeframe, params=strategy_params)
+                    self.strategy_manager.add_strategy(strategy_instance)
+            else:
+                logger.error(f"Strategy '{strategy_name}' is active but not found in STRATEGY_CLASS_MAP.")
+
+    def _initialize_constructor_components(self, config: Dict[str, Any]):
+        allocator_name = str(config.get('assetallocator', 'HRPAllocator')).lower()
+        if allocator_name == 'hrpallocator':
+            self.asset_allocator: BaseAssetAllocator = HRPAllocator(params=settings.get_strategy_params('HRPAllocator'))
+        else:
+            fixed_weights = {asset: 1.0/len(self.trading_universe) for asset in self.trading_universe}
+            self.asset_allocator = FixedWeightAssetAllocator(target_weights=fixed_weights)
+
+        self.rebalancer = BasicRebalancer(params=settings.get_strategy_params('Rebalancer'))
+        logger.info(f"Initialized Asset Allocator: {self.asset_allocator.__class__.__name__}")
+        logger.info(f"Initialized Rebalancer: {self.rebalancer.__class__.__name__}")
+
+    async def run_cycle(self, historical_data_for_cycle: Optional[Dict[str, pd.DataFrame]] = None):
+        if not historical_data_for_cycle:
+             if not self.is_backtest:
+                logger.warning("Live data fetching not yet implemented in PortfolioManager.run_cycle.")
+             return
+
+        # 1. Generate Signals from all active strategies
         signals: Dict[str, SignalType] = {}
         for strategy in self.strategy_manager.get_all_strategies():
-            if strategy.symbol in all_asset_data:
-                strategy.data_history = all_asset_data[strategy.symbol] # Ensure strategy has latest history
-                signal = strategy.on_bar_data(current_data[strategy.symbol])
-                if isinstance(signal, list): # Handle complex signals if necessary
-                    logger.warning(f"PortfolioManager received a list of SignalCommands from {strategy.name}, but does not yet support them. Taking first signal.")
-                    signal = signal[0].signal_type if signal else SignalType.HOLD
-                signals[strategy.symbol] = signal
+            if strategy.symbol in historical_data_for_cycle:
+                strategy.data_history = historical_data_for_cycle[strategy.symbol]
+                latest_bar_data = BarData(timestamp=strategy.data_history.index[-1], **strategy.data_history.iloc[-1].to_dict())
+                signal = strategy.on_bar_data(latest_bar_data)
+                if isinstance(signal, list): signal = signal[0].signal_type if signal else SignalType.HOLD
+                if signal != SignalType.HOLD: signals[strategy.symbol] = signal
         
-        logger.info(f"Generated signals: { {k: v.value for k, v in signals.items()} }")
+        logger.info(f"Consolidated signals: { {k: v.value for k, v in signals.items()} }")
 
-        # 4. Determine Target Allocation (simplified for now)
-        # This step should use the Asset Allocator.
-        # For Priority 1, we'll use a simplified logic: allocate to assets with LONG signals.
+        # 2. Determine Target Allocation
+        assets_with_signal = [asset for asset, sig in signals.items() if sig in [SignalType.LONG, SignalType.SHORT]]
         target_allocations_pct: Dict[str, float] = {asset: 0.0 for asset in self.trading_universe}
-        long_signals = [asset for asset, sig in signals.items() if sig == SignalType.LONG]
-        if long_signals:
-            equal_weight = 1.0 / len(long_signals)
-            for asset in long_signals:
-                target_allocations_pct[asset] = equal_weight
-        
-        logger.info(f"Target allocations: {target_allocations_pct}")
 
-        # 5. Generate Rebalancing Orders
-        asset_prices = {asset: bar.close for asset, bar in current_data.items() if asset in current_data}
+        if assets_with_signal:
+            allocation_data = {asset: data for asset, data in historical_data_for_cycle.items() if asset in assets_with_signal}
+            
+            # Ensure HRP allocator gets a returns series for each asset it needs to weigh
+            weights = self.asset_allocator.allocate(
+                assets=assets_with_signal,
+                portfolio_value=self.portfolio_snapshot.total_value_usd,
+                historical_data=allocation_data
+            )
+            
+            for asset, weight in weights.items():
+                if signals.get(asset) == SignalType.SHORT:
+                    target_allocations_pct[asset] = -abs(weight)
+                elif signals.get(asset) == SignalType.LONG:
+                    target_allocations_pct[asset] = abs(weight)
+
+        for asset, sig in signals.items():
+            if sig in [SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT]:
+                target_allocations_pct[asset] = 0.0
+
+        logger.info(f"Target allocations (%): { {k: f'{v*100:.2f}%' for k,v in target_allocations_pct.items()} }")
+
+        # 3. Generate Rebalancing Orders
+        asset_prices = {asset: data.iloc[-1]['close'] for asset, data in historical_data_for_cycle.items() if not data.empty}
         rebalancing_orders = self.rebalancer.generate_rebalancing_orders(
             current_portfolio=self.portfolio_snapshot,
             target_allocations_pct=target_allocations_pct,
             asset_prices=asset_prices,
         )
 
-        # 6. Execute Orders
+        # 4. Execute Orders
         if not rebalancing_orders:
             logger.info("No rebalancing orders to execute.")
         else:
             logger.info(f"Executing {len(rebalancing_orders)} rebalancing orders...")
             for order_params in rebalancing_orders:
                 logger.info(f"Placing order: {order_params}")
-                # In both live and backtest, this calls the (real or simulated) exchange API
                 await self.exchange_api.create_order(**order_params)
-
-        logger.info("Portfolio management cycle finished.")

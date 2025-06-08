@@ -1,7 +1,7 @@
 # FILE: kamikaze_komodo/backtesting_engine/performance_analyzer.py
 # Phase 6: Added Calmar, Sortino, Avg Holding Period, Win/Loss Streaks.
 # Configurable risk-free rate and annualization factor.
-# Phase 7: Added transaction pairing logic to correctly calculate trade metrics.
+# Phase 7: Simplified as transaction pairing now happens in the BacktestingEngine.
 
 from datetime import datetime, timedelta
 import pandas as pd
@@ -10,27 +10,26 @@ from typing import List, Dict, Any, Optional, Tuple
 from kamikaze_komodo.core.models import Trade
 from kamikaze_komodo.core.enums import OrderSide, TradeResult
 from kamikaze_komodo.app_logger import get_logger
+from collections import deque
+
 
 logger = get_logger(__name__)
 
 class PerformanceAnalyzer:
     def __init__(
         self,
-        trades: List[Trade],
+        trades: List[Trade], # Expects a list of COMPLETED trades
         initial_capital: float,
         final_capital: float,
         equity_curve_df: Optional[pd.DataFrame] = None, # Timestamp-indexed 'total_value'
         risk_free_rate_annual: float = 0.02, # Annual risk-free rate (e.g., 2%)
         annualization_factor: int = 252 # Trading days in a year for Sharpe/Sortino
     ):
-        raw_transactions = trades
-        if not raw_transactions:
-            logger.warning("PerformanceAnalyzer initialized with no transactions. Some metrics might be zero or NaN.")
+        if not trades:
+            logger.warning("PerformanceAnalyzer initialized with no completed trades. Some metrics might be zero or NaN.")
         
-        # FIX: Pair individual buy/sell transactions into complete trades
-        completed_trades = self._pair_transactions_to_trades(raw_transactions)
-
-        self.trades_df = pd.DataFrame([trade.model_dump() for trade in completed_trades])
+        # The Backtesting Engine now provides completed trades, so no pairing logic is needed here.
+        self.trades_df = pd.DataFrame([trade.model_dump() for trade in trades])
         if not self.trades_df.empty:
             self.trades_df['entry_timestamp'] = pd.to_datetime(self.trades_df['entry_timestamp'])
             self.trades_df['exit_timestamp'] = pd.to_datetime(self.trades_df['exit_timestamp'])
@@ -41,62 +40,8 @@ class PerformanceAnalyzer:
         self.risk_free_rate_annual = risk_free_rate_annual
         self.annualization_factor = annualization_factor
     
-        logger.info(f"PerformanceAnalyzer initialized. Completed Trades: {len(completed_trades)}, Initial: ${initial_capital:,.2f}, Final: ${final_capital:,.2f}")
+        logger.info(f"PerformanceAnalyzer initialized. Completed Trades: {len(trades)}, Initial: ${initial_capital:,.2f}, Final: ${final_capital:,.2f}")
         logger.info(f"Using Annual Risk-Free Rate: {self.risk_free_rate_annual*100:.2f}%, Annualization Factor: {self.annualization_factor}")
-
-    def _pair_transactions_to_trades(self, transactions: List[Trade]) -> List[Trade]:
-        """
-        Processes a raw list of transactions (buys and sells) and pairs them
-        into complete trades with calculated PnL. Assumes FIFO logic per symbol.
-        This simplified version assumes each sell closes a corresponding buy and vice-versa.
-        """
-        completed_trades: List[Trade] = []
-        open_positions: Dict[str, Trade] = {} # Keyed by symbol
-
-        for tx in sorted(transactions, key=lambda t: t.entry_timestamp):
-            symbol = tx.symbol
-            
-            # If there's an open position for this symbol
-            if symbol in open_positions:
-                open_trade = open_positions[symbol]
-                
-                # If the transaction is in the opposite direction, it's a closing trade
-                if tx.side != open_trade.side:
-                    # This is the closing transaction. Update the open_trade object.
-                    open_trade.exit_price = tx.entry_price
-                    open_trade.exit_timestamp = tx.entry_timestamp
-                    open_trade.exit_order_id = tx.entry_order_id
-                    
-                    # Calculate PnL
-                    # Note: Assumes full position close. Partial closes would need amount tracking.
-                    if open_trade.side == OrderSide.BUY: # Closing a long
-                        pnl = (open_trade.exit_price - open_trade.entry_price) * open_trade.amount
-                    else: # Closing a short
-                        pnl = (open_trade.entry_price - open_trade.exit_price) * open_trade.amount
-                    
-                    # Subtract commissions from both opening and closing transactions
-                    total_commission = open_trade.commission + tx.commission
-                    open_trade.pnl = pnl - total_commission
-                    open_trade.commission = total_commission
-                    open_trade.result = TradeResult.WIN if open_trade.pnl > 0 else (TradeResult.LOSS if open_trade.pnl < 0 else TradeResult.BREAKEVEN)
-                    
-                    completed_trades.append(open_trade.copy(deep=True))
-                    del open_positions[symbol]
-                else:
-                    # Scaling into a position. This simple model doesn't handle it.
-                    logger.warning(f"Scaling into existing position for {symbol} is not fully supported by this analyzer. Trade stats may be inaccurate.")
-                    open_positions[symbol] = tx
-            else:
-                # If there's no open position, this transaction must be an opening one.
-                if tx.side in [OrderSide.BUY, OrderSide.SELL]:
-                    open_positions[symbol] = tx
-        
-        if open_positions:
-            logger.warning(f"{len(open_positions)} positions were left open at the end of the backtest and are not included in trade statistics.")
-
-        logger.info(f"Paired {len(transactions)} transactions into {len(completed_trades)} completed trades.")
-        return completed_trades
-
 
     def _calculate_periodic_returns(self) -> Optional[pd.Series]:
         if self.equity_curve_df is None or self.equity_curve_df.empty or 'total_value' not in self.equity_curve_df.columns:
@@ -133,25 +78,33 @@ class PerformanceAnalyzer:
             "longest_loss_streak": 0,
         }
 
+        # Calculate metrics from the equity curve first, as they don't depend on trades
+        metrics["total_net_profit"] = self.final_capital - self.initial_capital
+        if self.initial_capital > 0:
+            metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
+        
+        # Max Drawdown (from equity curve)
+        if self.equity_curve_df is not None and not self.equity_curve_df.empty and 'total_value' in self.equity_curve_df.columns:
+            # FIX: Clip equity at 0 to prevent drawdowns > 100%
+            equity_values = self.equity_curve_df['total_value'].clip(lower=0)
+            if len(equity_values) > 1:
+                peak = equity_values.expanding(min_periods=1).max()
+                # Ensure peak is not zero to avoid division by zero if equity starts at 0
+                peak_safe = peak.replace(0, np.nan)
+                drawdown = (equity_values - peak_safe) / peak_safe
+                metrics["max_drawdown_pct"] = abs(drawdown.min()) * 100 if pd.notna(drawdown.min()) else 0.0
+
         if self.trades_df.empty:
-            metrics["total_net_profit"] = self.final_capital - self.initial_capital
-            if self.initial_capital > 0:
-                metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
-            logger.warning("No completed trades to analyze. Returning basic capital metrics.")
+            logger.warning("No completed trades to analyze. Returning portfolio-level metrics only.")
             return metrics
 
         pnl_series = self.trades_df['pnl'].dropna()
         if pnl_series.empty:
-            metrics["total_net_profit"] = self.final_capital - self.initial_capital # If PnL couldn't be calculated for trades
-            if self.initial_capital > 0: metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
-            metrics["total_trades"] = len(self.trades_df)
-            metrics["total_fees_paid"] = self.trades_df['commission'].sum()
+            logger.warning("No PnL data in trades to analyze. Returning portfolio-level metrics only.")
             return metrics
-    
-        metrics["total_net_profit"] = pnl_series.sum()
-        if self.initial_capital > 0: metrics["total_return_pct"] = (metrics["total_net_profit"] / self.initial_capital) * 100
+        
+        # --- Trade-based metrics ---
         metrics["total_trades"] = len(pnl_series)
-
         wins = pnl_series[pnl_series > 0]
         losses = pnl_series[pnl_series < 0]
         breakevens = pnl_series[pnl_series == 0]
@@ -173,15 +126,7 @@ class PerformanceAnalyzer:
     
         metrics["total_fees_paid"] = self.trades_df['commission'].sum()
 
-        # Max Drawdown (from equity curve)
-        if self.equity_curve_df is not None and not self.equity_curve_df.empty and 'total_value' in self.equity_curve_df.columns:
-            equity_values = self.equity_curve_df['total_value']
-            if len(equity_values) > 1:
-                peak = equity_values.expanding(min_periods=1).max()
-                drawdown = (equity_values - peak) / peak
-                metrics["max_drawdown_pct"] = abs(drawdown.min()) * 100 if not drawdown.empty else 0.0
-    
-        # Sharpe and Sortino Ratios
+        # --- Portfolio Ratios ---
         periodic_returns = self._calculate_periodic_returns()
         if periodic_returns is not None and len(periodic_returns) > 1:
             risk_free_rate_periodic = self.risk_free_rate_annual / self.annualization_factor
@@ -190,26 +135,26 @@ class PerformanceAnalyzer:
             # Sharpe Ratio
             sharpe_avg_excess_return = excess_returns.mean()
             sharpe_std_excess_return = excess_returns.std()
-            if sharpe_std_excess_return is not None and sharpe_std_excess_return != 0:
+            if sharpe_std_excess_return is not None and sharpe_std_excess_return > 1e-9:
                 metrics["sharpe_ratio"] = (sharpe_avg_excess_return / sharpe_std_excess_return) * np.sqrt(self.annualization_factor)
         
             # Sortino Ratio
             downside_returns = excess_returns[excess_returns < 0]
             if not downside_returns.empty:
                 downside_deviation = downside_returns.std()
-                if downside_deviation is not None and downside_deviation != 0:
+                if downside_deviation is not None and downside_deviation > 1e-9:
                     metrics["sortino_ratio"] = (sharpe_avg_excess_return / downside_deviation) * np.sqrt(self.annualization_factor)
     
         # Calmar Ratio
         if metrics["max_drawdown_pct"] is not None and metrics["max_drawdown_pct"] > 0:
-            # Annualized total return
             if self.equity_curve_df is not None and not self.equity_curve_df.empty:
                 start_date = self.equity_curve_df.index.min()
                 end_date = self.equity_curve_df.index.max()
-                duration_years = (end_date - start_date).days / 365.25 if (end_date - start_date).days > 0 else 1.0/365.25 # Avoid zero division
-                total_return = (self.final_capital / self.initial_capital) - 1 if self.initial_capital > 0 else 0
-                annualized_return = ((1 + total_return) ** (1 / duration_years)) - 1 if duration_years > 0 else total_return
-                metrics["calmar_ratio"] = (annualized_return * 100) / metrics["max_drawdown_pct"]
+                duration_years = (end_date - start_date).days / 365.25
+                if duration_years > 0:
+                    total_return = (self.final_capital / self.initial_capital) - 1 if self.initial_capital > 0 else 0
+                    annualized_return = ((1 + total_return) ** (1 / duration_years)) - 1
+                    metrics["calmar_ratio"] = (annualized_return * 100) / metrics["max_drawdown_pct"]
 
         # Average Holding Period
         if not self.trades_df.empty and 'exit_timestamp' in self.trades_df.columns and 'entry_timestamp' in self.trades_df.columns:
@@ -224,14 +169,11 @@ class PerformanceAnalyzer:
             current_win_streak, current_loss_streak = 0, 0
             for pnl_val in pnl_series:
                 if pnl_val > 0:
-                    current_win_streak += 1
-                    current_loss_streak = 0
+                    current_win_streak += 1; current_loss_streak = 0
                 elif pnl_val < 0:
-                    current_loss_streak += 1
-                    current_win_streak = 0
-                else: # Breakeven
-                    current_win_streak = 0
-                    current_loss_streak = 0
+                    current_loss_streak += 1; current_win_streak = 0
+                else:
+                    current_win_streak = 0; current_loss_streak = 0
                 win_streak = max(win_streak, current_win_streak)
                 loss_streak = max(loss_streak, current_loss_streak)
             metrics["longest_win_streak"] = win_streak
@@ -247,7 +189,7 @@ class PerformanceAnalyzer:
         --------------------------------------------------
         |           Backtest Performance Summary         |
         --------------------------------------------------
-        | Metric                       | Value             |
+        | Metric                       | Value               |
         --------------------------------------------------
         | Initial Capital              | ${metrics.get("initial_capital", 0):<15,.2f} |
         | Final Capital                | ${metrics.get("final_capital", 0):<15,.2f} |
