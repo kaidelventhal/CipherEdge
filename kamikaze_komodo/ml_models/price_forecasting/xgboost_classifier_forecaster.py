@@ -20,9 +20,9 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         # This prevents the super constructor's call to load_model from being overwritten.
         self.label_encoder = LabelEncoder()
         self.trained_feature_columns_: Optional[List[str]] = None
-        
+
         super().__init__(model_path, params) # Handles loading model if path provided
-        
+
         self.default_xgb_params = {
             'objective': 'multi:softprob', # For multiclass classification, outputs probabilities
             'eval_metric': 'mlogloss', # Multiclass logloss
@@ -36,15 +36,15 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         }
         config_xgb_params = {k.replace('xgb_params_', ''): v for k, v in self.params.items() if k.startswith('xgb_params_')}
         self.xgb_params = {**self.default_xgb_params, **config_xgb_params}
-        
+
         self.num_class = int(self.params.get('num_classes', 3)) # UP, DOWN, SIDEWAYS
         self.xgb_params['num_class'] = self.num_class
-        
+
         if not self.model and self.model_path:
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        if data.empty: 
+        if data.empty:
             return pd.DataFrame()
         df = data.copy()
         if 'close' not in df.columns:
@@ -66,18 +66,18 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
                 df.ta.rsi(length=14, append=True, col_names=('RSI_14',))
                 df.ta.macd(append=True, col_names=('MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'))
                 df.ta.atr(length=14, append=True, col_names=('ATR_14',))
-            except ImportError: 
+            except ImportError:
                 logger.warning("pandas_ta not installed. Skipping TA features for XGBoost.")
-            except Exception as e: 
+            except Exception as e:
                 logger.warning(f"Error creating TA features: {e}")
-        
+
         df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
     def _define_target(self, data: pd.DataFrame, thresholds: Optional[Tuple[float, float]] = (-0.001, 0.001)) -> pd.Series:
         """Defines target classes: 0 (UP), 1 (DOWN), 2 (SIDEWAYS)."""
         future_returns = data['close'].pct_change(1).shift(-1) # Next bar's return
-        if thresholds is None: 
+        if thresholds is None:
             thresholds = (-0.001, 0.001) # Default if not provided
         lower_thresh, upper_thresh = thresholds
 
@@ -93,7 +93,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         return_thresholds_str = self.params.get('returnthresholds_percent', "-0.001,0.001")
         try:
             thresholds_list = [float(x.strip()) for x in return_thresholds_str.split(',')]
-            if len(thresholds_list) != 2: 
+            if len(thresholds_list) != 2:
                 raise ValueError("ReturnThresholds_Percent must be two comma-separated floats.")
             return_thresholds = tuple(thresholds_list)
         except Exception as e:
@@ -113,7 +113,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             actual_features = [col for col in feature_columns if col in df_with_features.columns]
         else:
             default_feature_set = [
-                col for col in df_with_features.columns if 
+                col for col in df_with_features.columns if
                 col.startswith('log_return_lag_') or
                 col.startswith('close_change_lag_') or
                 col.startswith('volatility_') or
@@ -135,12 +135,12 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         logger.debug(f"XGBoost - NaN counts in X before dropna:\n{X.isnull().sum().sort_values(ascending=False)}")
         logger.debug(f"XGBoost - Shape of X before dropna: {X.shape}")
 
-        X.dropna(inplace=True) 
+        X.dropna(inplace=True)
 
         logger.debug(f"XGBoost - Shape of X after dropna: {X.shape}")
         logger.debug(f"XGBoost - Shape of y before aligning with X: {y.shape}")
 
-        y = y.loc[X.index] 
+        y = y.loc[X.index]
 
         logger.debug(f"XGBoost - Shape of y after aligning with X: {y.shape}")
         if not X.empty:
@@ -204,7 +204,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             predicted_class_encoded = np.argmax(probabilities)
             predicted_class_label = self.label_encoder.inverse_transform([predicted_class_encoded])[0] # Original label (0, 1, 2)
             confidence = probabilities[predicted_class_encoded]
-        
+
             return {
                 "predicted_class": int(predicted_class_label), # 0:UP, 1:DOWN, 2:SIDEWAYS
                 "confidence": float(confidence),

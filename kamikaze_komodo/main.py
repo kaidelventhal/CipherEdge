@@ -18,15 +18,19 @@ async def run_portfolio_backtest():
     Initializes and runs the backtesting engine, then prints performance results.
     """
     root_logger.info("--- Initializing Portfolio Backtest ---")
-    
+
+    # First, create the PortfolioManager instance that will be tested.
+    # By default, it loads its configuration from the settings file.
+    portfolio_manager = PortfolioManager()
+
     # Use the asynchronous factory `create` to instantiate the engine
     backtest_engine = await BacktestingEngine.create(
-        portfolio_manager_class=PortfolioManager,
+        portfolio_manager=portfolio_manager,
         initial_capital=float(settings.config.get('Backtesting', 'InitialCapital', fallback=10000.0)),
         commission_bps=float(settings.config.get('Trading', 'CommissionBPS', fallback=0.0)),
         slippage_bps=float(settings.config.get('Trading', 'SlippageBPS', fallback=0.0)),
     )
-    
+
     trades_log, final_portfolio, equity_curve_df = await backtest_engine.run()
 
     # Analyze and print performance
@@ -37,7 +41,7 @@ async def run_portfolio_backtest():
 
     if equity_curve_df is not None and not equity_curve_df.empty:
         logger.info("Equity curve generated. See logs or plotting output for details.")
-        
+
         performance_analyzer = PerformanceAnalyzer(
             trades=trades_log,
             initial_capital=final_portfolio.get('initial_capital', 0),
@@ -54,22 +58,22 @@ async def run_live_trading():
     Initializes the PortfolioManager and TaskScheduler for live trading.
     """
     logger.info("--- Initializing for LIVE TRADING ---")
-    
+
     portfolio_manager = PortfolioManager() # ExchangeAPI is initialized internally for live mode
     scheduler_manager = TaskScheduler()
-    
+
     # Schedule the portfolio manager's main execution cycle
     # The interval should match the strategy's timeframe or desired frequency
     run_interval_minutes = int(settings.config.get('Scheduler', 'RunIntervalMinutes', fallback=240))
     logger.info(f"Scheduling portfolio manager to run every {run_interval_minutes} minutes.")
-    
+
     scheduler_manager.add_job(
-        portfolio_manager.run_cycle, 
-        'interval', 
-        minutes=run_interval_minutes, 
+        portfolio_manager.run_cycle,
+        'interval',
+        minutes=run_interval_minutes,
         id='portfolio_run_cycle'
     )
-    
+
     try:
         scheduler_manager.start()
         # Keep the application running
@@ -92,7 +96,7 @@ async def main():
     if not settings:
         root_logger.critical("Settings failed to load. Application cannot start.")
         return
-        
+
     run_mode = settings.config.get('General', 'RunMode', fallback='backtest').lower()
     root_logger.info(f"Running in '{run_mode}' mode.")
 

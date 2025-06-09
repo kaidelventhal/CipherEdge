@@ -1,8 +1,4 @@
 # FILE: kamikaze_komodo/backtesting_engine/performance_analyzer.py
-# Phase 6: Added Calmar, Sortino, Avg Holding Period, Win/Loss Streaks.
-# Configurable risk-free rate and annualization factor.
-# Phase 7: Simplified as transaction pairing now happens in the BacktestingEngine.
-
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -28,7 +24,6 @@ class PerformanceAnalyzer:
         if not trades:
             logger.warning("PerformanceAnalyzer initialized with no completed trades. Some metrics might be zero or NaN.")
         
-        # The Backtesting Engine now provides completed trades, so no pairing logic is needed here.
         self.trades_df = pd.DataFrame([trade.model_dump() for trade in trades])
         if not self.trades_df.empty:
             self.trades_df['entry_timestamp'] = pd.to_datetime(self.trades_df['entry_timestamp'])
@@ -39,7 +34,7 @@ class PerformanceAnalyzer:
         self.equity_curve_df = equity_curve_df
         self.risk_free_rate_annual = risk_free_rate_annual
         self.annualization_factor = annualization_factor
-    
+        
         logger.info(f"PerformanceAnalyzer initialized. Completed Trades: {len(trades)}, Initial: ${initial_capital:,.2f}, Final: ${final_capital:,.2f}")
         logger.info(f"Using Annual Risk-Free Rate: {self.risk_free_rate_annual*100:.2f}%, Annualization Factor: {self.annualization_factor}")
 
@@ -187,9 +182,9 @@ class PerformanceAnalyzer:
 
         summary = f"""
         --------------------------------------------------
-        |           Backtest Performance Summary         |
+        |              Backtest Performance Summary              |
         --------------------------------------------------
-        | Metric                       | Value               |
+        | Metric                       | Value                 |
         --------------------------------------------------
         | Initial Capital              | ${metrics.get("initial_capital", 0):<15,.2f} |
         | Final Capital                | ${metrics.get("final_capital", 0):<15,.2f} |

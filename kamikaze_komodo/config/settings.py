@@ -103,8 +103,8 @@ class Config:
         # VertexAI Settings
         self.vertex_ai_project_id: Optional[str] = self.config.get('VertexAI', 'ProjectID', fallback=None)
         self.vertex_ai_location: Optional[str] = self.config.get('VertexAI', 'Location', fallback=None)
-        self.vertex_ai_sentiment_model_name: str = self.config.get('VertexAI', 'SentimentModelName', fallback='gemini-2.5-flash-preview-05-20')
-        self.vertex_ai_browser_agent_model_name: str = self.config.get('VertexAI', 'BrowserAgentModelName', fallback='gemini-2.5-flash-preview-05-20')
+        self.vertex_ai_sentiment_model_name: str = self.config.get('VertexAI', 'SentimentModelName', fallback='gemini-1.5-flash-preview-0514')
+        self.vertex_ai_browser_agent_model_name: str = self.config.get('VertexAI', 'BrowserAgentModelName', fallback='gemini-1.5-flash-preview-0514')
 
         if self.vertex_ai_project_id and self.vertex_ai_project_id.lower() == 'your-gcp-project-id':
             logger.warning("Vertex AI ProjectID is set to 'your-gcp-project-id'. Please update it in config.ini.")

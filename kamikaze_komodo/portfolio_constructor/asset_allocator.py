@@ -134,7 +134,7 @@ class HRPAllocator(BaseAssetAllocator):
 
         cluster1_var = self._get_cluster_var(cov_matrix, cluster1_items)
         cluster2_var = self._get_cluster_var(cov_matrix, cluster2_items)
-        
+
         # Handle potential division by zero if a cluster has zero variance
         total_cluster_var = cluster1_var + cluster2_var
         alpha = cluster2_var / total_cluster_var if total_cluster_var != 0 else 0.5
@@ -156,7 +156,7 @@ class HRPAllocator(BaseAssetAllocator):
         historical_data: Optional[Dict[str, pd.DataFrame]] = None,
         trade_history: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
-        
+
         num_assets = len(assets)
         if not historical_data or num_assets == 0:
             return {}
@@ -182,7 +182,7 @@ class HRPAllocator(BaseAssetAllocator):
         try:
             cov_matrix = returns_df.cov()
             corr_matrix = returns_df.corr()
-            
+
             dist_matrix = np.sqrt(0.5 * (1 - corr_matrix))
             condensed_dist_matrix = squareform(dist_matrix)
             link = linkage(condensed_dist_matrix, method=self.linkage_method)
@@ -191,7 +191,7 @@ class HRPAllocator(BaseAssetAllocator):
 
             initial_weights = np.ones(num_assets)
             hrp_weights_array = self._get_recursive_bisection(sort_ix, initial_weights, cov_matrix)
-        
+
             hrp_weights = pd.Series(hrp_weights_array, index=[assets[i] for i in sort_ix])
             hrp_weights = hrp_weights / hrp_weights.sum()
             hrp_weights = hrp_weights.reindex(assets).fillna(0.0)

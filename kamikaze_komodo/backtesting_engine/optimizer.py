@@ -4,13 +4,16 @@ import numpy as np
 from typing import List, Dict, Any, Callable, Tuple, Optional
 import itertools
 import optuna # For more advanced optimization like TPE
+import asyncio
 
 from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
+from kamikaze_komodo.orchestration.portfolio_manager import PortfolioManager
 from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
 from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
-from kamikaze_komodo.config.settings import settings as app_settings # Renamed to avoid conflict
-from kamikaze_komodo.risk_control_module.position_sizer import BasePositionSizer, FixedFractionalPositionSizer, ATRBasedPositionSizer # Add more as needed
-from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, PercentageStopManager, ATRStopManager # Add more as needed
+from kamikaze_komodo.config.settings import settings as app_settings
+from kamikaze_komodo.portfolio_constructor.asset_allocator import FixedWeightAssetAllocator
+from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, ATRStopManager, PercentageStopManager, TripleBarrierStopManager
+from kamikaze_komodo.risk_control_module.volatility_band_stop_manager import VolatilityBandStopManager
 from kamikaze_komodo.app_logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,20 +25,20 @@ class StrategyOptimizer:
     """
     def __init__(
         self,
-        strategy_class: type, # The class of the strategy to optimize (e.g., EWMACStrategy)
+        strategy_class: type,
         data_feed_df: pd.DataFrame,
-        param_grid: Dict[str, List[Any]], # e.g., {'short_window': [10, 12, 15], 'long_window': [20, 26, 30]}
-        optimization_metric: str = 'total_net_profit', # Metric to optimize (from PerformanceAnalyzer)
+        param_grid: Dict[str, List[Any]],
+        optimization_metric: str = 'total_net_profit',
         initial_capital: float = 10000.0,
         commission_bps: float = 0.0,
         slippage_bps: float = 0.0,
-        position_sizer_class_name: Optional[str] = None, # e.g., "FixedFractionalPositionSizer"
+        position_sizer_class_name: Optional[str] = None, # Note: This is now legacy. Sizing is handled by AssetAllocator.
         position_sizer_params: Optional[Dict[str, Any]] = None,
-        stop_manager_class_name: Optional[str] = None, # e.g., "PercentageStopManager"
+        stop_manager_class_name: Optional[str] = None,
         stop_manager_params: Optional[Dict[str, Any]] = None,
         sentiment_data_df: Optional[pd.DataFrame] = None,
-        symbol: Optional[str] = None, # Pass symbol if not in strategy params
-        timeframe: Optional[str] = None # Pass timeframe if not in strategy params
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None
     ):
         self.strategy_class = strategy_class
         self.data_feed_df = data_feed_df
@@ -45,7 +48,11 @@ class StrategyOptimizer:
         self.commission_bps = commission_bps
         self.slippage_bps = slippage_bps
 
+        # Legacy parameter, will be ignored by the new engine structure.
         self.position_sizer_class_name = position_sizer_class_name
+        if self.position_sizer_class_name:
+            logger.warning(f"position_sizer_class_name ('{position_sizer_class_name}') is a legacy parameter and will not be used in the unified backtesting engine.")
+
         self.position_sizer_params = position_sizer_params if position_sizer_params else {}
         self.stop_manager_class_name = stop_manager_class_name
         self.stop_manager_params = stop_manager_params if stop_manager_params else {}
@@ -54,74 +61,62 @@ class StrategyOptimizer:
         self.symbol = symbol if symbol else (app_settings.default_symbol if app_settings else "OPTIMIZE_SYMBOL")
         self.timeframe = timeframe if timeframe else (app_settings.default_timeframe if app_settings else "OPTIMIZE_TF")
 
-        logger.info(f"StrategyOptimizer initialized for {strategy_class.__name__} on {self.symbol} ({self.timeframe}). Optimizing for: {optimization_metric}")
-
-    def _get_risk_module_instance(self, class_name_str: Optional[str], base_module, params_to_pass: Dict):
-        if not class_name_str:
-            return None
-        try:
-            ClassReference = getattr(base_module, class_name_str)
-            return ClassReference(params=params_to_pass) # Assuming constructors accept 'params' dict
-        except AttributeError:
-            logger.error(f"Could not find class {class_name_str} in {base_module.__name__}")
-        except Exception as e:
-            logger.error(f"Error instantiating {class_name_str}: {e}")
-        return None
+        logger.info(f"StrategyOptimizer initialized for {strategy_class.__name__} on {self.symbol} ({self.timeframe}). Optimizing for: {self.optimization_metric}")
 
 
-    def _run_backtest_for_params(self, params_set: Dict[str, Any], current_data_feed: pd.DataFrame) -> float:
+    async def _run_backtest_for_params(self, params_set: Dict[str, Any], current_data_feed: pd.DataFrame) -> float:
         """Runs a single backtest for a given set of parameters."""
         try:
-            # Ensure strategy parameters are correctly passed, including any being optimized
+            # 1. Create the single strategy instance with the current parameter set
             strategy_instance = self.strategy_class(
                 symbol=self.symbol,
                 timeframe=self.timeframe,
-                params=params_set # Pass the current combination of parameters being tested
+                params=params_set
             )
-    
-            # Instantiate PositionSizer and StopManager if class names are provided
-            # Merging fixed params with optimized params (if any sizer/stop params are in param_grid)
-            combined_sizer_params = {**self.position_sizer_params, **params_set}
-            combined_stop_params = {**self.stop_manager_params, **params_set}
 
-            sizer_instance = self._get_risk_module_instance(self.position_sizer_class_name, pdm, combined_sizer_params) if self.position_sizer_class_name else FixedFractionalPositionSizer()
-            stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, smm, combined_stop_params) if self.stop_manager_class_name else PercentageStopManager()
-    
-            # Dynamically import position_sizer_module and stop_manager_module
-            import kamikaze_komodo.risk_control_module.position_sizer as pdm
-            import kamikaze_komodo.risk_control_module.stop_manager as smm
-            from kamikaze_komodo.risk_control_module.volatility_band_stop_manager import VolatilityBandStopManager # if used by name
+            # 2. For single-asset optimization, asset allocation is simply 100% to the asset if a signal exists.
+            # We use a FixedWeightAssetAllocator to achieve this. The PortfolioManager will use it.
+            asset_allocator = FixedWeightAssetAllocator(target_weights={self.symbol: 1.0})
 
-            if self.position_sizer_class_name:
-                sizer_instance = self._get_risk_module_instance(self.position_sizer_class_name, pdm, combined_sizer_params)
-            else: # Default sizer if none specified for optimization run
-                sizer_instance = FixedFractionalPositionSizer(params=combined_sizer_params)
+            # 3. Create a PortfolioManager configured for this single strategy run.
+            portfolio_manager = PortfolioManager(
+                trading_universe=[self.symbol],
+                strategy_instances=[strategy_instance],
+                asset_allocator=asset_allocator,
+            )
 
-
+            # 4. Create the stop manager for this run, using parameters from the optimization set.
+            stop_manager_instance = None
             if self.stop_manager_class_name:
-                if self.stop_manager_class_name == "VolatilityBandStopManager":
-                    # VolatilityBandStopManager is in a separate file
-                    from kamikaze_komodo.risk_control_module import volatility_band_stop_manager as vbsm
-                    stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, vbsm, combined_stop_params)
+                stop_module_map = {
+                    "ATRStopManager": ATRStopManager,
+                    "PercentageStopManager": PercentageStopManager,
+                    "TripleBarrierStopManager": TripleBarrierStopManager,
+                    "VolatilityBandStopManager": VolatilityBandStopManager,
+                }
+                StopManagerClass = stop_module_map.get(self.stop_manager_class_name)
+                if StopManagerClass:
+                    stop_manager_instance = StopManagerClass(params=params_set)
                 else:
-                    stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, smm, combined_stop_params)
-            else: # Default stop manager
-                stop_instance = PercentageStopManager(params=combined_stop_params)
+                    logger.error(f"Could not find stop manager class: {self.stop_manager_class_name}")
 
 
+            # 5. The data feed for the engine needs to be a dictionary
+            data_feeds = {self.symbol: current_data_feed}
+
+            # 6. Instantiate the BacktestingEngine with the specific PM, data, and stop manager
             engine = BacktestingEngine(
-                data_feed_df=current_data_feed,
-                strategy=strategy_instance,
+                portfolio_manager=portfolio_manager,
+                data_feeds=data_feeds,
                 initial_capital=self.initial_capital,
                 commission_bps=self.commission_bps,
                 slippage_bps=self.slippage_bps,
-                position_sizer=sizer_instance,
-                stop_manager=stop_instance,
-                sentiment_data_df=self.sentiment_data_df # Assumed to cover the current_data_feed period
+                stop_manager=stop_manager_instance,
             )
-            trades_log, final_portfolio, equity_curve = engine.run()
-    
-            # Metrics calculation
+
+            trades_log, final_portfolio, equity_curve = await engine.run()
+
+            # 7. Calculate performance metrics
             risk_free_rate = float(app_settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual', fallback=0.02)) if app_settings else 0.02
             annual_factor = int(app_settings.config.get('BacktestingPerformance', 'AnnualizationFactor', fallback=252)) if app_settings else 252
 
@@ -139,8 +134,6 @@ class StrategyOptimizer:
             if pd.isna(metric_value):
                 metric_value = -float('inf') if self.optimization_metric != 'max_drawdown_pct' else float('inf')
 
-            # For Optuna, which maximizes by default. If metric is drawdown, we want to minimize, so return negative.
-            # However, Optuna's direction is set in create_study. So, return the actual metric value.
             return float(metric_value)
 
         except Exception as e:
@@ -148,7 +141,7 @@ class StrategyOptimizer:
             return -float('inf') if self.optimization_metric != 'max_drawdown_pct' else float('inf')
 
 
-    def grid_search(self) -> Tuple[Optional[Dict[str, Any]], float, pd.DataFrame]:
+    async def grid_search(self) -> Tuple[Optional[Dict[str, Any]], float, pd.DataFrame]:
         param_names = list(self.param_grid.keys())
         param_value_combinations = list(itertools.product(*self.param_grid.values()))
 
@@ -156,16 +149,16 @@ class StrategyOptimizer:
         best_metric = -float('inf')
         if self.optimization_metric == 'max_drawdown_pct':
             best_metric = float('inf')
-    
+
         best_params = None
         logger.info(f"Starting Grid Search with {len(param_value_combinations)} combinations.")
 
         for i, combo in enumerate(param_value_combinations):
             current_params = dict(zip(param_names, combo))
             logger.debug(f"Grid Search - Combo {i+1}/{len(param_value_combinations)}: {current_params}")
-            metric_value = self._run_backtest_for_params(current_params, self.data_feed_df)
+            metric_value = await self._run_backtest_for_params(current_params, self.data_feed_df)
             results.append({**current_params, 'metric_value': metric_value})
-    
+
             if self.optimization_metric == 'max_drawdown_pct':
                 if metric_value < best_metric:
                     best_metric = metric_value
@@ -189,31 +182,36 @@ class StrategyOptimizer:
         direction = 'minimize' if self.optimization_metric == 'max_drawdown_pct' else 'maximize'
         study = optuna.create_study(study_name=study_name, storage=storage_url, load_if_exists=True, direction=direction)
 
+        # Optuna's objective function is synchronous. We need to run our async backtest from within it.
         def objective(trial: optuna.trial.Trial) -> float:
             params_set = {}
             for param_name, values in self.param_grid.items():
-                if not values: # Skip if param list is empty
+                if not values:
                     logger.warning(f"Parameter '{param_name}' in grid has empty values. Skipping for Optuna.")
                     continue
-                if isinstance(values[0], bool): # Categorical for bool
+                if isinstance(values[0], bool):
                     params_set[param_name] = trial.suggest_categorical(param_name, [True, False])
-                elif isinstance(values[0], int) and len(values) >= 2: # Treat as int range [min, max, step(optional)]
+                elif isinstance(values[0], int) and len(values) >= 2:
                     step = values[2] if len(values) > 2 else 1
                     params_set[param_name] = trial.suggest_int(param_name, values[0], values[1], step=step)
-                elif isinstance(values[0], float) and len(values) >= 2: # Treat as float range [min, max, step(optional for log)]
-                    # Optuna's suggest_float doesn't have a direct step like suggest_int.
-                    # If discrete floats are needed, use suggest_categorical or round after suggestion.
+                elif isinstance(values[0], float) and len(values) >= 2:
                     params_set[param_name] = trial.suggest_float(param_name, values[0], values[1])
-                elif isinstance(values, list): # Categorical for other types
+                elif isinstance(values, list):
                     params_set[param_name] = trial.suggest_categorical(param_name, values)
                 else:
                     logger.warning(f"Parameter '{param_name}' in grid has unsupported format for Optuna. Values: {values}. Skipping.")
-    
-            metric_value = self._run_backtest_for_params(params_set, self.data_feed_df)
+
+            # Get the running asyncio event loop and run the async backtest function
+            try:
+                loop = asyncio.get_running_loop()
+                metric_value = loop.run_until_complete(self._run_backtest_for_params(params_set, self.data_feed_df))
+            except RuntimeError: # If no loop is running (e.g., script is purely sync)
+                metric_value = asyncio.run(self._run_backtest_for_params(params_set, self.data_feed_df))
+
             return metric_value
 
         logger.info(f"Starting Optuna optimization with {n_trials} trials. Optimizing for {self.optimization_metric} ({direction}).")
-        study.optimize(objective, n_trials=n_trials, timeout=None) # Add timeout if needed
+        study.optimize(objective, n_trials=n_trials, timeout=None)
 
         best_params = None
         best_metric_value = study.best_value if study.best_trial else (-float('inf') if direction == 'maximize' else float('inf'))
@@ -223,82 +221,3 @@ class StrategyOptimizer:
         else:
             logger.warning("Optuna optimization completed but no best trial found (all trials might have failed or yielded non-comparable results).")
         return best_params, best_metric_value, study
-
-
-    def walk_forward_optimization(
-        self,
-        training_period_bars: int,
-        testing_period_bars: int,
-        step_size_bars: int,
-        optimization_method: str = 'grid_search',
-        optuna_n_trials_per_step: int = 50
-    ) -> List[Dict[str, Any]]:
-        if not isinstance(self.data_feed_df.index, pd.DatetimeIndex):
-            raise ValueError("data_feed_df must have a DatetimeIndex for walk-forward optimization.")
-
-        full_data = self.data_feed_df.copy()
-        n_total_bars = len(full_data)
-
-        if training_period_bars + testing_period_bars > n_total_bars:
-            logger.error("Not enough data for even one training/testing period in WFO.")
-            return []
-
-        results_over_time = []
-        start_idx = 0
-
-        logger.info(f"Starting Walk-Forward Optimization. Train: {training_period_bars}, Test: {testing_period_bars}, Step: {step_size_bars}")
-
-        original_full_data_feed = self.data_feed_df # Store the original full data feed reference
-
-        while start_idx + training_period_bars <= n_total_bars: # Ensure training period is within bounds
-            train_end_idx = start_idx + training_period_bars
-            test_start_idx = train_end_idx
-            test_end_idx = min(test_start_idx + testing_period_bars, n_total_bars) # Don't go beyond total bars
-
-            if test_start_idx >= test_end_idx : # No testing data left
-                break
-
-            training_data = full_data.iloc[start_idx:train_end_idx]
-            testing_data = full_data.iloc[test_start_idx:test_end_idx]
-    
-            logger.info(f"WFO Step: Training from {training_data.index[0]} to {training_data.index[-1]} ({len(training_data)} bars)")
-    
-            self.data_feed_df = training_data # Temporarily set data_feed_df for optimization methods
-
-            best_params_for_step: Optional[Dict[str, Any]] = None
-            train_metric_value = -float('inf')
-
-            if optimization_method == 'grid_search':
-                best_params_for_step, train_metric_value, _ = self.grid_search()
-            elif optimization_method == 'optuna':
-                study_name_wfo = f"{self.strategy_class.__name__}_WFO_Step_{start_idx}"
-                best_params_for_step, train_metric_value, _ = self.optuna_optimize(n_trials=optuna_n_trials_per_step, study_name=study_name_wfo)
-            else:
-                logger.error(f"Unsupported optimization_method: {optimization_method}")
-                self.data_feed_df = original_full_data_feed # Restore
-                return results_over_time
-
-            if best_params_for_step:
-                logger.info(f"WFO Step: Best params from training: {best_params_for_step} (Metric: {train_metric_value:.4f})")
-                logger.info(f"WFO Step: Testing from {testing_data.index[0]} to {testing_data.index[-1]} ({len(testing_data)} bars) with best params.")
-        
-                test_metric_value = self._run_backtest_for_params(best_params_for_step, testing_data)
-        
-                results_over_time.append({
-                    'train_start_date': training_data.index[0],
-                    'train_end_date': training_data.index[-1],
-                    'test_start_date': testing_data.index[0],
-                    'test_end_date': testing_data.index[-1],
-                    'best_params': best_params_for_step,
-                    f'train_{self.optimization_metric}': train_metric_value,
-                    f'test_{self.optimization_metric}': test_metric_value
-                })
-                logger.info(f"WFO Step: Test period {self.optimization_metric}: {test_metric_value:.4f}")
-            else:
-                logger.warning("WFO Step: No best parameters found in training phase. Skipping test for this step.")
-
-            start_idx += step_size_bars
-
-        self.data_feed_df = original_full_data_feed # Restore original full data feed
-        logger.info("Walk-Forward Optimization completed.")
-        return results_over_time

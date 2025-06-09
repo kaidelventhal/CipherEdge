@@ -63,15 +63,19 @@ async def run_portfolio_backtest():
     Initializes and runs the backtesting engine, then prints performance results.
     """
     root_logger.info("--- Initializing Portfolio Backtest ---")
-    
+
+    # First, create the PortfolioManager instance that will be tested.
+    # By default, it loads its configuration from the settings file.
+    portfolio_manager = PortfolioManager()
+
     # Use the asynchronous factory `create` to instantiate the engine
     backtest_engine = await BacktestingEngine.create(
-        portfolio_manager_class=PortfolioManager,
+        portfolio_manager=portfolio_manager,
         initial_capital=float(settings.config.get('Backtesting', 'InitialCapital', fallback=10000.0)),
         commission_bps=float(settings.config.get('Trading', 'CommissionBPS', fallback=0.0)),
         slippage_bps=float(settings.config.get('Trading', 'SlippageBPS', fallback=0.0)),
     )
-    
+
     trades_log, final_portfolio, equity_curve_df = await backtest_engine.run()
 
     # Analyze and print performance
@@ -82,7 +86,7 @@ async def run_portfolio_backtest():
 
     if equity_curve_df is not None and not equity_curve_df.empty:
         logger.info("Equity curve generated. See logs or plotting output for details.")
-        
+
         performance_analyzer = PerformanceAnalyzer(
             trades=trades_log,
             initial_capital=final_portfolio.get('initial_capital', 0),
@@ -99,22 +103,22 @@ async def run_live_trading():
     Initializes the PortfolioManager and TaskScheduler for live trading.
     """
     logger.info("--- Initializing for LIVE TRADING ---")
-    
+
     portfolio_manager = PortfolioManager() # ExchangeAPI is initialized internally for live mode
     scheduler_manager = TaskScheduler()
-    
+
     # Schedule the portfolio manager's main execution cycle
     # The interval should match the strategy's timeframe or desired frequency
     run_interval_minutes = int(settings.config.get('Scheduler', 'RunIntervalMinutes', fallback=240))
     logger.info(f"Scheduling portfolio manager to run every {run_interval_minutes} minutes.")
-    
+
     scheduler_manager.add_job(
-        portfolio_manager.run_cycle, 
-        'interval', 
-        minutes=run_interval_minutes, 
+        portfolio_manager.run_cycle,
+        'interval',
+        minutes=run_interval_minutes,
         id='portfolio_run_cycle'
     )
-    
+
     try:
         scheduler_manager.start()
         # Keep the application running
@@ -137,7 +141,7 @@ async def main():
     if not settings:
         root_logger.critical("Settings failed to load. Application cannot start.")
         return
-        
+
     run_mode = settings.config.get('General', 'RunMode', fallback='backtest').lower()
     root_logger.info(f"Running in '{run_mode}' mode.")
 
@@ -167,6 +171,147 @@ kamikaze_komodo/__init__.py:
 <code>
 # kamikaze_komodo/__init__.py
 # This file makes the 'root' directory a Python package.
+</code>
+
+kamikaze_komodo/optimizer_main.py:
+<code>
+# FILE: optimizer_main.py
+import asyncio
+import pandas as pd
+from kamikaze_komodo.backtesting_engine.optimizer import StrategyOptimizer
+from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
+from kamikaze_komodo.config.settings import settings
+from datetime import datetime, timedelta, timezone
+from kamikaze_komodo.app_logger import get_logger
+
+# Import all strategies to be tested
+from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
+from kamikaze_komodo.strategy_framework.strategies.bollinger_band_breakout_strategy import BollingerBandBreakoutStrategy
+from kamikaze_komodo.strategy_framework.strategies.ehlers_instantaneous_trendline import EhlersInstantaneousTrendlineStrategy
+
+
+logger = get_logger("Optimizer")
+
+async def main():
+    """
+    Main function to set up and run a comparative optimization across multiple strategies.
+    """
+    if not settings:
+        logger.critical("Settings not loaded. Cannot run optimizer.")
+        return
+
+    # --- 1. Load Data for a Single Asset ---
+    asset_to_optimize = "PF_XBTUSD"
+    timeframe = settings.default_timeframe
+
+    logger.info(f"Loading data for optimization: {asset_to_optimize} ({timeframe})")
+    db_manager = DatabaseManager()
+    data_fetcher = DataFetcher()
+    start_date = datetime.now(timezone.utc) - timedelta(days=settings.historical_data_days)
+
+    bars = db_manager.retrieve_bar_data(asset_to_optimize, timeframe, start_date=start_date)
+    if not bars or len(bars) < 200:
+        logger.info(f"Fetching fresh data for {asset_to_optimize}...")
+        bars = await data_fetcher.fetch_historical_data_for_period(asset_to_optimize, timeframe, start_date)
+        if bars: db_manager.store_bar_data(bars)
+
+    await data_fetcher.close()
+    db_manager.close()
+
+    if not bars:
+        logger.error(f"Could not load data for {asset_to_optimize}. Aborting optimization.")
+        return
+
+    data_df = pd.DataFrame([bar.model_dump() for bar in bars])
+    data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
+    data_df.set_index('timestamp', inplace=True)
+    logger.info(f"Loaded {len(data_df)} bars for {asset_to_optimize}.")
+
+    # --- 2. Define Strategies and Parameter Grids for Optimization ---
+    # Common risk parameters to be tested with each strategy
+    risk_params = {
+        'triplebarrier_tp_multiple': [2.0, 3.0],
+        'triplebarrier_sl_multiple': [1.5, 2.0],
+        'triplebarrier_time_limit_bars': [20, 30],
+    }
+
+    # Dictionary mapping strategy classes to their specific parameter grids
+    optimization_tasks = {
+        EWMACStrategy: {
+            'shortwindow': [20, 30],
+            'longwindow': [50, 60],
+            **risk_params
+        },
+        BollingerBandBreakoutStrategy: {
+            'bb_period': [20, 30],
+            'bb_std_dev': [2.0, 2.5],
+            **risk_params
+        },
+        EhlersInstantaneousTrendlineStrategy: {
+            'it_lag_trigger': [1, 2],
+            **risk_params
+        },
+    }
+
+    overall_best_result = {
+        'strategy': None,
+        'params': None,
+        'metric_value': -float('inf')
+    }
+
+    optimization_metric = 'sharpe_ratio'
+
+    # --- 3. Loop Through and Optimize Each Strategy ---
+    for strategy_class, param_grid in optimization_tasks.items():
+        logger.info(f"\n--- Starting Optimization for {strategy_class.__name__} ---")
+
+        optimizer = StrategyOptimizer(
+            strategy_class=strategy_class,
+            data_feed_df=data_df,
+            param_grid=param_grid,
+            optimization_metric=optimization_metric,
+            initial_capital=float(settings.config.get('Backtesting', 'InitialCapital')),
+            commission_bps=float(settings.config.get('Trading', 'CommissionBPS')),
+            slippage_bps=float(settings.config.get('Trading', 'SlippageBPS')),
+            symbol=asset_to_optimize,
+            timeframe=timeframe,
+            position_sizer_class_name="FixedFractionalPositionSizer",
+            stop_manager_class_name="TripleBarrierStopManager"
+        )
+
+        logger.info(f"Starting Grid Search for '{strategy_class.__name__}'...")
+        best_params, best_metric, results_df = await optimizer.grid_search()
+
+        logger.info(f"--- Optimization for {strategy_class.__name__} Finished ---")
+        if best_params:
+            logger.info(f"Best Metric ({optimization_metric}): {best_metric:.4f}")
+            logger.info(f"Best Parameters: {best_params}")
+
+            if best_metric > overall_best_result['metric_value']:
+                overall_best_result['strategy'] = strategy_class.__name__
+                overall_best_result['params'] = best_params
+                overall_best_result['metric_value'] = best_metric
+                logger.info(f"*** New Overall Best Found: {strategy_class.__name__} with metric {best_metric:.4f} ***")
+        else:
+            logger.warning(f"Optimization for {strategy_class.__name__} did not yield any successful results.")
+
+    # --- 4. Report Final Winner ---
+    logger.info("\n\n---=== OVERALL OPTIMIZATION COMPLETE ===---")
+    if overall_best_result['strategy']:
+        logger.info(f"The best performing strategy is: {overall_best_result['strategy']}")
+        logger.info(f"Best overall metric ({optimization_metric}): {overall_best_result['metric_value']:.4f}")
+        logger.info(f"Best overall parameters: {overall_best_result['params']}")
+        logger.info("\nUpdate your config.ini with these new 'best' parameters to improve performance.")
+    else:
+        logger.warning("No successful results found across all strategies.")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.critical(f"Critical error in optimizer execution: {e}", exc_info=True)
 </code>
 
 kamikaze_komodo/ml_models/__init__.py:
@@ -1189,8 +1334,10 @@ class LSTMForecaster(BasePriceForecaster):
         super().__init__(model_path, params)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.sequence_length = int(self.params.get('sequencelength', 60))
-        self.num_features = int(self.params.get('numfeatures', 5))
-        self.feature_columns = self.params.get('featurecolumns', 'close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14').split(',')
+        self.feature_columns_str = self.params.get('featurecolumns', 'close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14')
+        self.feature_columns = [col.strip() for col in self.feature_columns_str.split(',')]
+        self.num_features = len(self.feature_columns)
+
 
         # Model hyperparameters
         self.hidden_size = int(self.params.get('hiddensize', 50))
@@ -1199,7 +1346,7 @@ class LSTMForecaster(BasePriceForecaster):
         self.num_epochs = int(self.params.get('numepochs', 20))
         self.batch_size = int(self.params.get('batchsize', 32))
         self.learning_rate = float(self.params.get('learningrate', 0.001))
-        
+
         # Initialize model architecture but don't load weights from super() as it's not implemented there for torch
         self.model = LSTMNetwork(
             input_size=self.num_features,
@@ -1215,60 +1362,67 @@ class LSTMForecaster(BasePriceForecaster):
         if data.empty:
             return pd.DataFrame()
         df = data.copy()
-        
+
         import pandas_ta as ta
         for lag in [1, 3, 5]:
             df[f'log_return_lag_{lag}'] = np.log(df['close'] / df['close'].shift(lag))
             df[f'close_change_lag_{lag}'] = df['close'].pct_change(lag)
         df['volatility_5'] = df['log_return_lag_1'].rolling(window=5).std()
         df.ta.rsi(length=14, append=True, col_names=('RSI_14',))
-        
+
         df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
-    def _create_sequences(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _create_sequences(self, data: np.ndarray, target_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         X, y = [], []
+        # Exclude target from feature set
+        feature_indices = [i for i in range(data.shape[1]) if i != target_idx]
         for i in range(len(data) - self.sequence_length):
-            X.append(data[i:(i + self.sequence_length), :-1])
-            y.append(data[i + self.sequence_length, -1])
+            X.append(data[i:(i + self.sequence_length), feature_indices])
+            y.append(data[i + self.sequence_length, target_idx])
         return np.array(X), np.array(y)
+
 
     def train(self, historical_data: pd.DataFrame, target_column: str = 'close_change_lag_1_future', feature_columns: Optional[list] = None):
         logger.info("Starting LSTM training...")
         df_features = self.create_features(historical_data)
-        
+
         if feature_columns is None:
             feature_columns = self.feature_columns
-            
+
         df_features['target'] = df_features['close'].pct_change(1).shift(-1)
-        
+
         # --- FIX: Select final columns BEFORE dropping NaN values ---
-        # 1. Define the list of columns to be used in the model
         final_columns_to_use = feature_columns + ['target']
         
-        # 2. Select only this subset of data
+        # Check if all columns are present
+        missing_cols = set(final_columns_to_use) - set(df_features.columns)
+        if missing_cols:
+            logger.error(f"Missing required columns for LSTM training: {missing_cols}. Cannot proceed.")
+            return
+
         features_with_target = df_features[final_columns_to_use]
-        
-        # 3. NOW, drop rows where any of these specific columns have NaN
         features_with_target = features_with_target.dropna()
 
-        # 4. Add a guard clause in case the DataFrame is empty after dropping NaNs
         if features_with_target.empty:
             logger.error("DataFrame is empty after selecting features and dropping NaNs. Not enough data to create complete feature/target rows. Cannot train LSTM model.")
             return
         # --- END FIX ---
-        
+
         # Scale data
         scaled_data = self.scaler.fit_transform(features_with_target)
         
-        X, y = self._create_sequences(scaled_data)
+        # Find index of target column for sequence creation
+        target_idx = features_with_target.columns.get_loc('target')
+        
+        X, y = self._create_sequences(scaled_data, target_idx)
         X_train = torch.from_numpy(X).float()
         y_train = torch.from_numpy(y).float().view(-1, 1)
-        
+
         # Training Loop
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
-        
+
         for epoch in range(self.num_epochs):
             self.model.train()
             outputs = self.model(X_train)
@@ -1286,35 +1440,50 @@ class LSTMForecaster(BasePriceForecaster):
         if self.model is None or self.scaler is None:
             logger.error("Model or scaler not available.")
             return None
-        
+
         self.model.eval()
         df_features = self.create_features(new_data)
-        
+
         if feature_columns is None:
             feature_columns = self.trained_feature_columns_ or self.feature_columns
-            
-        # We need `sequence_length` of feature data to make one prediction
+
         if len(df_features) < self.sequence_length:
             return None
-            
+
         last_sequence_unscaled = df_features[feature_columns].iloc[-self.sequence_length:]
         if last_sequence_unscaled.isnull().values.any():
             return None # Cannot predict with NaNs
+
+        # Use a temporary scaler fitted on the feature columns only to avoid data leakage
+        temp_scaler = MinMaxScaler(feature_range=(-1,1))
+        # This scaler should ideally be fitted on the same training distribution
+        # For simplicity here, we transform based on the scaler fitted during training, which included the target
+        # A more robust solution involves saving separate scalers for features and target.
         
-        # Note: Scaler was fit on features + target. We only scale features here for prediction.
-        # This is a simplification; a more robust approach uses separate scalers.
-        # For now, we reuse the fitted scaler on the feature subset.
-        scaled_sequence = self.scaler.transform(pd.concat([last_sequence_unscaled, pd.DataFrame(columns=['target'])], axis=1))[:, :-1]
+        # We need to create a dummy dataframe with all original columns to use the fitted scaler
+        all_cols = self.trained_feature_columns_ + ['target']
+        dummy_df_for_scaling = pd.DataFrame(columns=all_cols)
+        for col in feature_columns:
+            dummy_df_for_scaling[col] = last_sequence_unscaled[col]
+        dummy_df_for_scaling = dummy_df_for_scaling.fillna(0) # fill target with dummy values
         
+        scaled_data = self.scaler.transform(dummy_df_for_scaling)
+        
+        # Extract only the feature columns from the scaled data
+        target_idx = all_cols.index('target')
+        feature_indices = [i for i, col in enumerate(all_cols) if i != target_idx]
+        scaled_sequence = scaled_data[:, feature_indices]
+
+
         with torch.no_grad():
             input_tensor = torch.from_numpy(scaled_sequence).float().unsqueeze(0) # Add batch dimension
             prediction_scaled = self.model(input_tensor)
-        
+
         # We need to inverse transform the prediction. This requires a dummy array.
-        dummy_array = np.zeros((1, len(feature_columns) + 1))
-        dummy_array[0, -1] = prediction_scaled.item()
-        prediction_unscaled = self.scaler.inverse_transform(dummy_array)[0, -1]
-        
+        dummy_array = np.zeros((1, len(all_cols)))
+        dummy_array[0, target_idx] = prediction_scaled.item()
+        prediction_unscaled = self.scaler.inverse_transform(dummy_array)[0, target_idx]
+
         return float(prediction_unscaled)
 
     def save_model(self, path: str):
@@ -1374,9 +1543,9 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         # This prevents the super constructor's call to load_model from being overwritten.
         self.label_encoder = LabelEncoder()
         self.trained_feature_columns_: Optional[List[str]] = None
-        
+
         super().__init__(model_path, params) # Handles loading model if path provided
-        
+
         self.default_xgb_params = {
             'objective': 'multi:softprob', # For multiclass classification, outputs probabilities
             'eval_metric': 'mlogloss', # Multiclass logloss
@@ -1390,15 +1559,15 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         }
         config_xgb_params = {k.replace('xgb_params_', ''): v for k, v in self.params.items() if k.startswith('xgb_params_')}
         self.xgb_params = {**self.default_xgb_params, **config_xgb_params}
-        
+
         self.num_class = int(self.params.get('num_classes', 3)) # UP, DOWN, SIDEWAYS
         self.xgb_params['num_class'] = self.num_class
-        
+
         if not self.model and self.model_path:
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        if data.empty: 
+        if data.empty:
             return pd.DataFrame()
         df = data.copy()
         if 'close' not in df.columns:
@@ -1420,18 +1589,18 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
                 df.ta.rsi(length=14, append=True, col_names=('RSI_14',))
                 df.ta.macd(append=True, col_names=('MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9'))
                 df.ta.atr(length=14, append=True, col_names=('ATR_14',))
-            except ImportError: 
+            except ImportError:
                 logger.warning("pandas_ta not installed. Skipping TA features for XGBoost.")
-            except Exception as e: 
+            except Exception as e:
                 logger.warning(f"Error creating TA features: {e}")
-        
+
         df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
     def _define_target(self, data: pd.DataFrame, thresholds: Optional[Tuple[float, float]] = (-0.001, 0.001)) -> pd.Series:
         """Defines target classes: 0 (UP), 1 (DOWN), 2 (SIDEWAYS)."""
         future_returns = data['close'].pct_change(1).shift(-1) # Next bar's return
-        if thresholds is None: 
+        if thresholds is None:
             thresholds = (-0.001, 0.001) # Default if not provided
         lower_thresh, upper_thresh = thresholds
 
@@ -1447,7 +1616,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         return_thresholds_str = self.params.get('returnthresholds_percent', "-0.001,0.001")
         try:
             thresholds_list = [float(x.strip()) for x in return_thresholds_str.split(',')]
-            if len(thresholds_list) != 2: 
+            if len(thresholds_list) != 2:
                 raise ValueError("ReturnThresholds_Percent must be two comma-separated floats.")
             return_thresholds = tuple(thresholds_list)
         except Exception as e:
@@ -1467,7 +1636,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             actual_features = [col for col in feature_columns if col in df_with_features.columns]
         else:
             default_feature_set = [
-                col for col in df_with_features.columns if 
+                col for col in df_with_features.columns if
                 col.startswith('log_return_lag_') or
                 col.startswith('close_change_lag_') or
                 col.startswith('volatility_') or
@@ -1489,12 +1658,12 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         logger.debug(f"XGBoost - NaN counts in X before dropna:\n{X.isnull().sum().sort_values(ascending=False)}")
         logger.debug(f"XGBoost - Shape of X before dropna: {X.shape}")
 
-        X.dropna(inplace=True) 
+        X.dropna(inplace=True)
 
         logger.debug(f"XGBoost - Shape of X after dropna: {X.shape}")
         logger.debug(f"XGBoost - Shape of y before aligning with X: {y.shape}")
 
-        y = y.loc[X.index] 
+        y = y.loc[X.index]
 
         logger.debug(f"XGBoost - Shape of y after aligning with X: {y.shape}")
         if not X.empty:
@@ -1558,7 +1727,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             predicted_class_encoded = np.argmax(probabilities)
             predicted_class_label = self.label_encoder.inverse_transform([predicted_class_encoded])[0] # Original label (0, 1, 2)
             confidence = probabilities[predicted_class_encoded]
-        
+
             return {
                 "predicted_class": int(predicted_class_label), # 0:UP, 1:DOWN, 2:SIDEWAYS
                 "confidence": float(confidence),
@@ -2206,6 +2375,8 @@ from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings
 from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
 from kamikaze_komodo.strategy_framework.strategy_manager import StrategyManager
+# --- FIX: Import the Ehlers strategy ---
+from kamikaze_komodo.strategy_framework.strategies.ehlers_instantaneous_trendline import EhlersInstantaneousTrendlineStrategy
 from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
 from kamikaze_komodo.strategy_framework.strategies.bollinger_band_breakout_strategy import BollingerBandBreakoutStrategy
 from kamikaze_komodo.strategy_framework.strategies.funding_rate_arb_strategy import FundingRateArbStrategy
@@ -2218,12 +2389,13 @@ from kamikaze_komodo.core.enums import SignalType
 
 logger = get_logger(__name__)
 
-# Mapping of strategy names in config to their respective classes
+# --- FIX: Add the Ehlers strategy to the class map ---
 STRATEGY_CLASS_MAP: Dict[str, Type[BaseStrategy]] = {
     "EWMAC_Strategy": EWMACStrategy,
     "BollingerBandBreakout_Strategy": BollingerBandBreakoutStrategy,
     "FundingRateArb_Strategy": FundingRateArbStrategy,
     "MLForecaster_Strategy": MLForecasterStrategy,
+    "EhlersInstantaneousTrendline_Strategy": EhlersInstantaneousTrendlineStrategy, # Add this line
 }
 
 
@@ -2233,29 +2405,47 @@ class PortfolioManager:
     Manages data, strategies, and execution for a portfolio of assets.
     """
 
-    def __init__(self, exchange_api: Optional[Any] = None):
+    def __init__(
+        self,
+        exchange_api: Optional[Any] = None,
+        trading_universe: Optional[List[str]] = None,
+        strategy_instances: Optional[List[BaseStrategy]] = None,
+        asset_allocator: Optional[BaseAssetAllocator] = None,
+    ):
         if not settings:
             raise ValueError("Settings not loaded.")
-        
+
         self.exchange_api = exchange_api if exchange_api else ExchangeAPI()
         self.is_backtest = exchange_api is not None
-        
-        self.portfolio_config = settings.get_strategy_params('Portfolio')
-        self.trading_universe: List[str] = [s.strip() for s in self.portfolio_config.get('tradinguniverse', '').split(',')]
         self.timeframe = settings.default_timeframe
-        
-        logger.info(f"Managing portfolio for universe: {self.trading_universe}")
 
         self.strategy_manager = StrategyManager()
-        self._load_strategies()
+        self.portfolio_config = settings.get_strategy_params('Portfolio')
 
-        self._initialize_constructor_components(self.portfolio_config)
+        if trading_universe is not None and strategy_instances is not None:
+            # Programmatic configuration (for optimizer)
+            self.trading_universe = trading_universe
+            for strategy in strategy_instances:
+                self.strategy_manager.add_strategy(strategy)
+            self.asset_allocator = asset_allocator if asset_allocator is not None else HRPAllocator(params=settings.get_strategy_params('HRPAllocator'))
+            self.rebalancer = BasicRebalancer(params=settings.get_strategy_params('Rebalancer'))
+        else:
+            # Config-file based configuration (for main backtest/live)
+            self.trading_universe: List[str] = [s.strip() for s in self.portfolio_config.get('tradinguniverse', '').split(',')]
+            self._load_strategies()
+            self._initialize_constructor_components(self.portfolio_config)
+
+
+        logger.info(f"Managing portfolio for universe: {self.trading_universe}")
+        logger.info(f"Initialized Asset Allocator: {self.asset_allocator.__class__.__name__}")
+        logger.info(f"Initialized Rebalancer: {self.rebalancer.__class__.__name__}")
 
         self.portfolio_snapshot = PortfolioSnapshot(
-            total_value_usd=10000.0, # Initialized from config now
+            total_value_usd=10000.0, # Will be updated by engine
             cash_balance_usd=10000.0,
             positions={asset: 0.0 for asset in self.trading_universe}
         )
+
 
     def _load_strategies(self):
         logger.info("Dynamically loading strategies from config...")
@@ -2265,7 +2455,7 @@ class PortfolioManager:
             return
 
         active_strategy_names = [s.strip() for s in active_strategies_str.split(',')]
-        
+
         for strategy_name in active_strategy_names:
             strategy_class = STRATEGY_CLASS_MAP.get(strategy_name)
             if strategy_class:
@@ -2285,41 +2475,48 @@ class PortfolioManager:
             self.asset_allocator = FixedWeightAssetAllocator(target_weights=fixed_weights)
 
         self.rebalancer = BasicRebalancer(params=settings.get_strategy_params('Rebalancer'))
-        logger.info(f"Initialized Asset Allocator: {self.asset_allocator.__class__.__name__}")
-        logger.info(f"Initialized Rebalancer: {self.rebalancer.__class__.__name__}")
 
     async def run_cycle(self, historical_data_for_cycle: Optional[Dict[str, pd.DataFrame]] = None):
         if not historical_data_for_cycle:
-             if not self.is_backtest:
+            if not self.is_backtest:
                 logger.warning("Live data fetching not yet implemented in PortfolioManager.run_cycle.")
-             return
+            return
 
         # 1. Generate Signals from all active strategies
         signals: Dict[str, SignalType] = {}
         for strategy in self.strategy_manager.get_all_strategies():
             if strategy.symbol in historical_data_for_cycle:
                 strategy.data_history = historical_data_for_cycle[strategy.symbol]
-                latest_bar_data = BarData(timestamp=strategy.data_history.index[-1], **strategy.data_history.iloc[-1].to_dict())
+                
+                bar_data_dict = strategy.data_history.iloc[-1].to_dict()
+                bar_data_dict.pop('symbol', None)
+                bar_data_dict.pop('timeframe', None)
+
+                latest_bar_data = BarData(
+                    timestamp=strategy.data_history.index[-1], 
+                    symbol=strategy.symbol, 
+                    timeframe=self.timeframe, 
+                    **bar_data_dict
+                )
+
                 signal = strategy.on_bar_data(latest_bar_data)
                 if isinstance(signal, list): signal = signal[0].signal_type if signal else SignalType.HOLD
-                if signal != SignalType.HOLD: signals[strategy.symbol] = signal
-        
+                if signal != SignalType.HOLD:
+                    signals[strategy.symbol] = signal
+
         logger.info(f"Consolidated signals: { {k: v.value for k, v in signals.items()} }")
 
         # 2. Determine Target Allocation
-        assets_with_signal = [asset for asset, sig in signals.items() if sig in [SignalType.LONG, SignalType.SHORT]]
-        target_allocations_pct: Dict[str, float] = {asset: 0.0 for asset in self.trading_universe}
+        target_allocations_pct: Dict[str, float] = {}
 
-        if assets_with_signal:
-            allocation_data = {asset: data for asset, data in historical_data_for_cycle.items() if asset in assets_with_signal}
-            
-            # Ensure HRP allocator gets a returns series for each asset it needs to weigh
+        assets_with_entry_signal = [asset for asset, sig in signals.items() if sig in [SignalType.LONG, SignalType.SHORT]]
+        if assets_with_entry_signal:
+            allocation_data = {asset: data for asset, data in historical_data_for_cycle.items() if asset in assets_with_entry_signal}
             weights = self.asset_allocator.allocate(
-                assets=assets_with_signal,
+                assets=assets_with_entry_signal,
                 portfolio_value=self.portfolio_snapshot.total_value_usd,
                 historical_data=allocation_data
             )
-            
             for asset, weight in weights.items():
                 if signals.get(asset) == SignalType.SHORT:
                     target_allocations_pct[asset] = -abs(weight)
@@ -3379,7 +3576,7 @@ class HRPAllocator(BaseAssetAllocator):
 
         cluster1_var = self._get_cluster_var(cov_matrix, cluster1_items)
         cluster2_var = self._get_cluster_var(cov_matrix, cluster2_items)
-        
+
         # Handle potential division by zero if a cluster has zero variance
         total_cluster_var = cluster1_var + cluster2_var
         alpha = cluster2_var / total_cluster_var if total_cluster_var != 0 else 0.5
@@ -3401,7 +3598,7 @@ class HRPAllocator(BaseAssetAllocator):
         historical_data: Optional[Dict[str, pd.DataFrame]] = None,
         trade_history: Optional[pd.DataFrame] = None
     ) -> Dict[str, float]:
-        
+
         num_assets = len(assets)
         if not historical_data or num_assets == 0:
             return {}
@@ -3427,7 +3624,7 @@ class HRPAllocator(BaseAssetAllocator):
         try:
             cov_matrix = returns_df.cov()
             corr_matrix = returns_df.corr()
-            
+
             dist_matrix = np.sqrt(0.5 * (1 - corr_matrix))
             condensed_dist_matrix = squareform(dist_matrix)
             link = linkage(condensed_dist_matrix, method=self.linkage_method)
@@ -3436,7 +3633,7 @@ class HRPAllocator(BaseAssetAllocator):
 
             initial_weights = np.ones(num_assets)
             hrp_weights_array = self._get_recursive_bisection(sort_ix, initial_weights, cov_matrix)
-        
+
             hrp_weights = pd.Series(hrp_weights_array, index=[assets[i] for i in sort_ix])
             hrp_weights = hrp_weights / hrp_weights.sum()
             hrp_weights = hrp_weights.reindex(assets).fillna(0.0)
@@ -3460,8 +3657,8 @@ kamikaze_komodo/portfolio_constructor/rebalancer.py:
 # kamikaze_komodo/portfolio_constructor/rebalancer.py
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
-from kamikaze_komodo.core.models import PortfolioSnapshot # For current holdings
-from kamikaze_komodo.core.enums import OrderSide, OrderType # For generating orders
+from kamikaze_komodo.core.models import PortfolioSnapshot
+from kamikaze_komodo.core.enums import OrderSide, OrderType
 from kamikaze_komodo.app_logger import get_logger
 import pandas as pd
 
@@ -3476,106 +3673,26 @@ class BaseRebalancer(ABC):
         logger.info(f"{self.__class__.__name__} initialized with params: {self.params}")
 
     @abstractmethod
-    def needs_rebalancing(
-        self,
-        current_portfolio: PortfolioSnapshot,
-        target_allocations_pct: Dict[str, float], # e.g. {'BTC/USD': 0.6, 'ETH/USD': 0.4} as fractions
-        asset_prices: Dict[str, float] # Current market prices for assets {'BTC/USD': 50000, ...}
-    ) -> bool:
-        """
-        Determines if the portfolio needs rebalancing based on current state and targets.
-        Args:
-            current_portfolio (PortfolioSnapshot): The current state of the portfolio (contains positions quantity).
-            target_allocations_pct (Dict[str, float]): The desired target allocations as percentages.
-            asset_prices (Dict[str, float]): Current market prices of the assets.
-        Returns:
-            bool: True if rebalancing is needed, False otherwise.
-        """
-        pass
-
-    @abstractmethod
     def generate_rebalancing_orders(
         self,
         current_portfolio: PortfolioSnapshot,
         target_allocations_pct: Dict[str, float],
-        asset_prices: Dict[str, float] # Current market prices for assets
-    ) -> List[Dict[str, Any]]: # List of order parameters
+        asset_prices: Dict[str, float]
+    ) -> List[Dict[str, Any]]:
         """
         Generates orders needed to rebalance the portfolio to target allocations.
-        Args:
-            current_portfolio (PortfolioSnapshot): The current state of the portfolio.
-            target_allocations_pct (Dict[str, float]): The desired target allocations as percentages.
-            asset_prices (Dict[str, float]): Current market prices of the assets.
-        Returns:
-            List[Dict[str, Any]]: A list of order parameters (e.g., for exchange_api.create_order).
         """
         pass
 
 class BasicRebalancer(BaseRebalancer):
     """
-    Rebalances the portfolio if the current weight of any asset deviates
-    from its target weight by more than a specified threshold.
+    Rebalances the portfolio based on a target allocation dictionary.
+    If an asset with a current position is NOT in the target dictionary, it is held.
     """
     def __init__(self, params: Optional[Dict[str, Any]] = None):
         super().__init__(params)
-        self.deviation_threshold = float(self.params.get('rebalancer_deviationthreshold', 0.05)) # Default 5% deviation
-        self.min_order_value_usd = float(self.params.get('rebalancer_min_order_value_usd', 10.0)) # Min order value to execute
-        logger.info(f"BasicRebalancer initialized with deviation threshold: {self.deviation_threshold*100}%, Min Order Value: ${self.min_order_value_usd}")
-
-    def _get_current_weights(self, current_portfolio: PortfolioSnapshot, asset_prices: Dict[str, float]) -> Dict[str, float]:
-        current_weights: Dict[str, float] = {}
-        total_value_from_positions = 0.0
-        asset_values : Dict[str, float] = {}
-
-        for asset, quantity in current_portfolio.positions.items():
-            if asset in asset_prices and asset_prices[asset] > 0:
-                value = quantity * asset_prices[asset]
-                asset_values[asset] = value
-                total_value_from_positions += value
-            else:
-                logger.warning(f"Price for asset {asset} not available or zero. Cannot calculate its value for rebalancing.")
-                asset_values[asset] = 0.0
-
-        # Effective portfolio value for weight calculation is cash + value of positions
-        effective_total_value = current_portfolio.cash_balance_usd + total_value_from_positions
-        if effective_total_value <= 0:
-            return {asset: 0.0 for asset in current_portfolio.positions.keys()}
-
-        for asset, value in asset_values.items():
-            current_weights[asset] = value / effective_total_value
-
-        # Add assets that are in target but not in current holdings (weight 0)
-        for asset in asset_prices.keys():
-            if asset not in current_weights:
-                current_weights[asset] = 0.0
-        return current_weights
-
-
-    def needs_rebalancing(
-        self,
-        current_portfolio: PortfolioSnapshot,
-        target_allocations_pct: Dict[str, float],
-        asset_prices: Dict[str, float]
-    ) -> bool:
-        if not target_allocations_pct:
-            logger.debug("No target allocations provided, rebalancing not needed by BasicRebalancer.")
-            return False
-
-        current_weights = self._get_current_weights(current_portfolio, asset_prices)
-        if not current_weights and any(v > 0 for v in target_allocations_pct.values()): # No current holdings but target has allocations
-            logger.info("Rebalancing needed: No current holdings, but target allocations exist.")
-            return True
-
-        all_assets = set(current_weights.keys()).union(set(target_allocations_pct.keys()))
-
-        for asset in all_assets:
-            current_w = current_weights.get(asset, 0.0)
-            target_w = target_allocations_pct.get(asset, 0.0)
-            if abs(current_w - target_w) > self.deviation_threshold:
-                logger.info(f"Rebalancing needed for {asset}. Current weight: {current_w:.4f}, Target: {target_w:.4f}, Deviation: {abs(current_w - target_w):.4f} > {self.deviation_threshold:.4f}")
-                return True
-        logger.debug("BasicRebalancer: No rebalancing needed based on deviation threshold.")
-        return False
+        self.min_order_value_usd = float(self.params.get('rebalancer_min_order_value_usd', 10.0))
+        logger.info(f"BasicRebalancer initialized with Min Order Value: ${self.min_order_value_usd}")
 
     def generate_rebalancing_orders(
         self,
@@ -3584,63 +3701,53 @@ class BasicRebalancer(BaseRebalancer):
         asset_prices: Dict[str, float]
     ) -> List[Dict[str, Any]]:
         orders: List[Dict[str, Any]] = []
-        if current_portfolio.total_value_usd <=0 :
+        if current_portfolio.total_value_usd <= 0:
             logger.warning("Portfolio total value is zero or negative. Cannot generate rebalancing orders.")
             return orders
 
-        # Calculate current values of each asset
-        current_asset_values: Dict[str, float] = {}
-        for asset, quantity in current_portfolio.positions.items():
-            if asset in asset_prices and asset_prices[asset] > 0:
-                current_asset_values[asset] = quantity * asset_prices[asset]
-            else:
-                current_asset_values[asset] = 0.0
+        # Determine the target value in USD for each asset based on the total portfolio equity
+        target_asset_values: Dict[str, float] = {
+            asset: current_portfolio.total_value_usd * target_pct
+            for asset, target_pct in target_allocations_pct.items()
+        }
 
-        # Calculate target values based on total portfolio value
-        target_asset_values: Dict[str, float] = {}
-        for asset, target_pct in target_allocations_pct.items():
-            target_asset_values[asset] = current_portfolio.total_value_usd * target_pct
-
-        all_assets_in_scope = set(current_asset_values.keys()).union(set(target_asset_values.keys()))
+        all_assets_in_scope = set(current_portfolio.positions.keys()).union(set(target_allocations_pct.keys()))
 
         for asset in all_assets_in_scope:
-            current_value = current_asset_values.get(asset, 0.0)
-            target_value = target_asset_values.get(asset, 0.0)
             price = asset_prices.get(asset)
-
             if price is None or price <= 0:
                 logger.warning(f"Cannot generate order for {asset}: price is missing or invalid ({price}).")
                 continue
 
-            value_diff = target_value - current_value
-            amount_to_trade = value_diff / price
+            current_quantity = current_portfolio.positions.get(asset, 0.0)
+            
+            # If an asset is not in the target dictionary, its target quantity is its current quantity.
+            # This correctly implements the "HOLD" signal.
+            target_value = target_asset_values.get(asset, current_quantity * price)
+            target_quantity = target_value / price
 
-            if abs(value_diff) < self.min_order_value_usd: # Skip if trade value is too small
-                logger.debug(f"Skipping rebalance for {asset}: change in value ({value_diff:.2f}) is less than min_order_value_usd (${self.min_order_value_usd:.2f}).")
+            quantity_diff = target_quantity - current_quantity
+            value_of_trade = abs(quantity_diff * price)
+
+            if value_of_trade < self.min_order_value_usd:
                 continue
 
-            if abs(amount_to_trade) > 1e-8: # Ensure there's a non-negligible amount to trade
-                order_side = OrderSide.BUY if amount_to_trade > 0 else OrderSide.SELL
+            if abs(quantity_diff) > 1e-9: # Use a small epsilon to avoid floating point noise
+                order_side = OrderSide.BUY if quantity_diff > 0 else OrderSide.SELL
                 orders.append({
                     'symbol': asset,
-                    'type': OrderType.MARKET, # Or allow configurable order type
+                    'type': OrderType.MARKET,
                     'side': order_side,
-                    'amount': abs(amount_to_trade)
+                    'amount': abs(quantity_diff)
                 })
-                logger.info(f"Generated rebalancing order for {asset}: {order_side.value} {abs(amount_to_trade):.6f} units. Target Value: ${target_value:.2f}, Current Value: ${current_value:.2f}")
+                logger.info(f"Generated rebalancing order for {asset}: {order_side.value} {abs(quantity_diff):.6f} units. Target Value: ${target_value:.2f}, Current Value: ${current_quantity * price:.2f}")
 
-        # Orders should ideally be prioritized (e.g., sells before buys if cash is needed)
-        # This basic implementation doesn't handle that.
         return orders
 </code>
 
 kamikaze_komodo/backtesting_engine/performance_analyzer.py:
 <code>
 # FILE: kamikaze_komodo/backtesting_engine/performance_analyzer.py
-# Phase 6: Added Calmar, Sortino, Avg Holding Period, Win/Loss Streaks.
-# Configurable risk-free rate and annualization factor.
-# Phase 7: Simplified as transaction pairing now happens in the BacktestingEngine.
-
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -3666,7 +3773,6 @@ class PerformanceAnalyzer:
         if not trades:
             logger.warning("PerformanceAnalyzer initialized with no completed trades. Some metrics might be zero or NaN.")
         
-        # The Backtesting Engine now provides completed trades, so no pairing logic is needed here.
         self.trades_df = pd.DataFrame([trade.model_dump() for trade in trades])
         if not self.trades_df.empty:
             self.trades_df['entry_timestamp'] = pd.to_datetime(self.trades_df['entry_timestamp'])
@@ -3677,7 +3783,7 @@ class PerformanceAnalyzer:
         self.equity_curve_df = equity_curve_df
         self.risk_free_rate_annual = risk_free_rate_annual
         self.annualization_factor = annualization_factor
-    
+        
         logger.info(f"PerformanceAnalyzer initialized. Completed Trades: {len(trades)}, Initial: ${initial_capital:,.2f}, Final: ${final_capital:,.2f}")
         logger.info(f"Using Annual Risk-Free Rate: {self.risk_free_rate_annual*100:.2f}%, Annualization Factor: {self.annualization_factor}")
 
@@ -3825,9 +3931,9 @@ class PerformanceAnalyzer:
 
         summary = f"""
         --------------------------------------------------
-        |           Backtest Performance Summary         |
+        |              Backtest Performance Summary              |
         --------------------------------------------------
-        | Metric                       | Value               |
+        | Metric                       | Value                 |
         --------------------------------------------------
         | Initial Capital              | ${metrics.get("initial_capital", 0):<15,.2f} |
         | Final Capital                | ${metrics.get("final_capital", 0):<15,.2f} |
@@ -3871,13 +3977,16 @@ import numpy as np
 from typing import List, Dict, Any, Callable, Tuple, Optional
 import itertools
 import optuna # For more advanced optimization like TPE
+import asyncio
 
 from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy
+from kamikaze_komodo.orchestration.portfolio_manager import PortfolioManager
 from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
 from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
-from kamikaze_komodo.config.settings import settings as app_settings # Renamed to avoid conflict
-from kamikaze_komodo.risk_control_module.position_sizer import BasePositionSizer, FixedFractionalPositionSizer, ATRBasedPositionSizer # Add more as needed
-from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, PercentageStopManager, ATRStopManager # Add more as needed
+from kamikaze_komodo.config.settings import settings as app_settings
+from kamikaze_komodo.portfolio_constructor.asset_allocator import FixedWeightAssetAllocator
+from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, ATRStopManager, PercentageStopManager, TripleBarrierStopManager
+from kamikaze_komodo.risk_control_module.volatility_band_stop_manager import VolatilityBandStopManager
 from kamikaze_komodo.app_logger import get_logger
 
 logger = get_logger(__name__)
@@ -3889,20 +3998,20 @@ class StrategyOptimizer:
     """
     def __init__(
         self,
-        strategy_class: type, # The class of the strategy to optimize (e.g., EWMACStrategy)
+        strategy_class: type,
         data_feed_df: pd.DataFrame,
-        param_grid: Dict[str, List[Any]], # e.g., {'short_window': [10, 12, 15], 'long_window': [20, 26, 30]}
-        optimization_metric: str = 'total_net_profit', # Metric to optimize (from PerformanceAnalyzer)
+        param_grid: Dict[str, List[Any]],
+        optimization_metric: str = 'total_net_profit',
         initial_capital: float = 10000.0,
         commission_bps: float = 0.0,
         slippage_bps: float = 0.0,
-        position_sizer_class_name: Optional[str] = None, # e.g., "FixedFractionalPositionSizer"
+        position_sizer_class_name: Optional[str] = None, # Note: This is now legacy. Sizing is handled by AssetAllocator.
         position_sizer_params: Optional[Dict[str, Any]] = None,
-        stop_manager_class_name: Optional[str] = None, # e.g., "PercentageStopManager"
+        stop_manager_class_name: Optional[str] = None,
         stop_manager_params: Optional[Dict[str, Any]] = None,
         sentiment_data_df: Optional[pd.DataFrame] = None,
-        symbol: Optional[str] = None, # Pass symbol if not in strategy params
-        timeframe: Optional[str] = None # Pass timeframe if not in strategy params
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None
     ):
         self.strategy_class = strategy_class
         self.data_feed_df = data_feed_df
@@ -3912,7 +4021,11 @@ class StrategyOptimizer:
         self.commission_bps = commission_bps
         self.slippage_bps = slippage_bps
 
+        # Legacy parameter, will be ignored by the new engine structure.
         self.position_sizer_class_name = position_sizer_class_name
+        if self.position_sizer_class_name:
+            logger.warning(f"position_sizer_class_name ('{position_sizer_class_name}') is a legacy parameter and will not be used in the unified backtesting engine.")
+
         self.position_sizer_params = position_sizer_params if position_sizer_params else {}
         self.stop_manager_class_name = stop_manager_class_name
         self.stop_manager_params = stop_manager_params if stop_manager_params else {}
@@ -3921,74 +4034,62 @@ class StrategyOptimizer:
         self.symbol = symbol if symbol else (app_settings.default_symbol if app_settings else "OPTIMIZE_SYMBOL")
         self.timeframe = timeframe if timeframe else (app_settings.default_timeframe if app_settings else "OPTIMIZE_TF")
 
-        logger.info(f"StrategyOptimizer initialized for {strategy_class.__name__} on {self.symbol} ({self.timeframe}). Optimizing for: {optimization_metric}")
-
-    def _get_risk_module_instance(self, class_name_str: Optional[str], base_module, params_to_pass: Dict):
-        if not class_name_str:
-            return None
-        try:
-            ClassReference = getattr(base_module, class_name_str)
-            return ClassReference(params=params_to_pass) # Assuming constructors accept 'params' dict
-        except AttributeError:
-            logger.error(f"Could not find class {class_name_str} in {base_module.__name__}")
-        except Exception as e:
-            logger.error(f"Error instantiating {class_name_str}: {e}")
-        return None
+        logger.info(f"StrategyOptimizer initialized for {strategy_class.__name__} on {self.symbol} ({self.timeframe}). Optimizing for: {self.optimization_metric}")
 
 
-    def _run_backtest_for_params(self, params_set: Dict[str, Any], current_data_feed: pd.DataFrame) -> float:
+    async def _run_backtest_for_params(self, params_set: Dict[str, Any], current_data_feed: pd.DataFrame) -> float:
         """Runs a single backtest for a given set of parameters."""
         try:
-            # Ensure strategy parameters are correctly passed, including any being optimized
+            # 1. Create the single strategy instance with the current parameter set
             strategy_instance = self.strategy_class(
                 symbol=self.symbol,
                 timeframe=self.timeframe,
-                params=params_set # Pass the current combination of parameters being tested
+                params=params_set
             )
-    
-            # Instantiate PositionSizer and StopManager if class names are provided
-            # Merging fixed params with optimized params (if any sizer/stop params are in param_grid)
-            combined_sizer_params = {**self.position_sizer_params, **params_set}
-            combined_stop_params = {**self.stop_manager_params, **params_set}
 
-            sizer_instance = self._get_risk_module_instance(self.position_sizer_class_name, pdm, combined_sizer_params) if self.position_sizer_class_name else FixedFractionalPositionSizer()
-            stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, smm, combined_stop_params) if self.stop_manager_class_name else PercentageStopManager()
-    
-            # Dynamically import position_sizer_module and stop_manager_module
-            import kamikaze_komodo.risk_control_module.position_sizer as pdm
-            import kamikaze_komodo.risk_control_module.stop_manager as smm
-            from kamikaze_komodo.risk_control_module.volatility_band_stop_manager import VolatilityBandStopManager # if used by name
+            # 2. For single-asset optimization, asset allocation is simply 100% to the asset if a signal exists.
+            # We use a FixedWeightAssetAllocator to achieve this. The PortfolioManager will use it.
+            asset_allocator = FixedWeightAssetAllocator(target_weights={self.symbol: 1.0})
 
-            if self.position_sizer_class_name:
-                sizer_instance = self._get_risk_module_instance(self.position_sizer_class_name, pdm, combined_sizer_params)
-            else: # Default sizer if none specified for optimization run
-                sizer_instance = FixedFractionalPositionSizer(params=combined_sizer_params)
+            # 3. Create a PortfolioManager configured for this single strategy run.
+            portfolio_manager = PortfolioManager(
+                trading_universe=[self.symbol],
+                strategy_instances=[strategy_instance],
+                asset_allocator=asset_allocator,
+            )
 
-
+            # 4. Create the stop manager for this run, using parameters from the optimization set.
+            stop_manager_instance = None
             if self.stop_manager_class_name:
-                if self.stop_manager_class_name == "VolatilityBandStopManager":
-                    # VolatilityBandStopManager is in a separate file
-                    from kamikaze_komodo.risk_control_module import volatility_band_stop_manager as vbsm
-                    stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, vbsm, combined_stop_params)
+                stop_module_map = {
+                    "ATRStopManager": ATRStopManager,
+                    "PercentageStopManager": PercentageStopManager,
+                    "TripleBarrierStopManager": TripleBarrierStopManager,
+                    "VolatilityBandStopManager": VolatilityBandStopManager,
+                }
+                StopManagerClass = stop_module_map.get(self.stop_manager_class_name)
+                if StopManagerClass:
+                    stop_manager_instance = StopManagerClass(params=params_set)
                 else:
-                    stop_instance = self._get_risk_module_instance(self.stop_manager_class_name, smm, combined_stop_params)
-            else: # Default stop manager
-                stop_instance = PercentageStopManager(params=combined_stop_params)
+                    logger.error(f"Could not find stop manager class: {self.stop_manager_class_name}")
 
 
+            # 5. The data feed for the engine needs to be a dictionary
+            data_feeds = {self.symbol: current_data_feed}
+
+            # 6. Instantiate the BacktestingEngine with the specific PM, data, and stop manager
             engine = BacktestingEngine(
-                data_feed_df=current_data_feed,
-                strategy=strategy_instance,
+                portfolio_manager=portfolio_manager,
+                data_feeds=data_feeds,
                 initial_capital=self.initial_capital,
                 commission_bps=self.commission_bps,
                 slippage_bps=self.slippage_bps,
-                position_sizer=sizer_instance,
-                stop_manager=stop_instance,
-                sentiment_data_df=self.sentiment_data_df # Assumed to cover the current_data_feed period
+                stop_manager=stop_manager_instance,
             )
-            trades_log, final_portfolio, equity_curve = engine.run()
-    
-            # Metrics calculation
+
+            trades_log, final_portfolio, equity_curve = await engine.run()
+
+            # 7. Calculate performance metrics
             risk_free_rate = float(app_settings.config.get('BacktestingPerformance', 'RiskFreeRateAnnual', fallback=0.02)) if app_settings else 0.02
             annual_factor = int(app_settings.config.get('BacktestingPerformance', 'AnnualizationFactor', fallback=252)) if app_settings else 252
 
@@ -4006,8 +4107,6 @@ class StrategyOptimizer:
             if pd.isna(metric_value):
                 metric_value = -float('inf') if self.optimization_metric != 'max_drawdown_pct' else float('inf')
 
-            # For Optuna, which maximizes by default. If metric is drawdown, we want to minimize, so return negative.
-            # However, Optuna's direction is set in create_study. So, return the actual metric value.
             return float(metric_value)
 
         except Exception as e:
@@ -4015,7 +4114,7 @@ class StrategyOptimizer:
             return -float('inf') if self.optimization_metric != 'max_drawdown_pct' else float('inf')
 
 
-    def grid_search(self) -> Tuple[Optional[Dict[str, Any]], float, pd.DataFrame]:
+    async def grid_search(self) -> Tuple[Optional[Dict[str, Any]], float, pd.DataFrame]:
         param_names = list(self.param_grid.keys())
         param_value_combinations = list(itertools.product(*self.param_grid.values()))
 
@@ -4023,16 +4122,16 @@ class StrategyOptimizer:
         best_metric = -float('inf')
         if self.optimization_metric == 'max_drawdown_pct':
             best_metric = float('inf')
-    
+
         best_params = None
         logger.info(f"Starting Grid Search with {len(param_value_combinations)} combinations.")
 
         for i, combo in enumerate(param_value_combinations):
             current_params = dict(zip(param_names, combo))
             logger.debug(f"Grid Search - Combo {i+1}/{len(param_value_combinations)}: {current_params}")
-            metric_value = self._run_backtest_for_params(current_params, self.data_feed_df)
+            metric_value = await self._run_backtest_for_params(current_params, self.data_feed_df)
             results.append({**current_params, 'metric_value': metric_value})
-    
+
             if self.optimization_metric == 'max_drawdown_pct':
                 if metric_value < best_metric:
                     best_metric = metric_value
@@ -4056,31 +4155,36 @@ class StrategyOptimizer:
         direction = 'minimize' if self.optimization_metric == 'max_drawdown_pct' else 'maximize'
         study = optuna.create_study(study_name=study_name, storage=storage_url, load_if_exists=True, direction=direction)
 
+        # Optuna's objective function is synchronous. We need to run our async backtest from within it.
         def objective(trial: optuna.trial.Trial) -> float:
             params_set = {}
             for param_name, values in self.param_grid.items():
-                if not values: # Skip if param list is empty
+                if not values:
                     logger.warning(f"Parameter '{param_name}' in grid has empty values. Skipping for Optuna.")
                     continue
-                if isinstance(values[0], bool): # Categorical for bool
+                if isinstance(values[0], bool):
                     params_set[param_name] = trial.suggest_categorical(param_name, [True, False])
-                elif isinstance(values[0], int) and len(values) >= 2: # Treat as int range [min, max, step(optional)]
+                elif isinstance(values[0], int) and len(values) >= 2:
                     step = values[2] if len(values) > 2 else 1
                     params_set[param_name] = trial.suggest_int(param_name, values[0], values[1], step=step)
-                elif isinstance(values[0], float) and len(values) >= 2: # Treat as float range [min, max, step(optional for log)]
-                    # Optuna's suggest_float doesn't have a direct step like suggest_int.
-                    # If discrete floats are needed, use suggest_categorical or round after suggestion.
+                elif isinstance(values[0], float) and len(values) >= 2:
                     params_set[param_name] = trial.suggest_float(param_name, values[0], values[1])
-                elif isinstance(values, list): # Categorical for other types
+                elif isinstance(values, list):
                     params_set[param_name] = trial.suggest_categorical(param_name, values)
                 else:
                     logger.warning(f"Parameter '{param_name}' in grid has unsupported format for Optuna. Values: {values}. Skipping.")
-    
-            metric_value = self._run_backtest_for_params(params_set, self.data_feed_df)
+
+            # Get the running asyncio event loop and run the async backtest function
+            try:
+                loop = asyncio.get_running_loop()
+                metric_value = loop.run_until_complete(self._run_backtest_for_params(params_set, self.data_feed_df))
+            except RuntimeError: # If no loop is running (e.g., script is purely sync)
+                metric_value = asyncio.run(self._run_backtest_for_params(params_set, self.data_feed_df))
+
             return metric_value
 
         logger.info(f"Starting Optuna optimization with {n_trials} trials. Optimizing for {self.optimization_metric} ({direction}).")
-        study.optimize(objective, n_trials=n_trials, timeout=None) # Add timeout if needed
+        study.optimize(objective, n_trials=n_trials, timeout=None)
 
         best_params = None
         best_metric_value = study.best_value if study.best_trial else (-float('inf') if direction == 'maximize' else float('inf'))
@@ -4090,125 +4194,41 @@ class StrategyOptimizer:
         else:
             logger.warning("Optuna optimization completed but no best trial found (all trials might have failed or yielded non-comparable results).")
         return best_params, best_metric_value, study
-
-
-    def walk_forward_optimization(
-        self,
-        training_period_bars: int,
-        testing_period_bars: int,
-        step_size_bars: int,
-        optimization_method: str = 'grid_search',
-        optuna_n_trials_per_step: int = 50
-    ) -> List[Dict[str, Any]]:
-        if not isinstance(self.data_feed_df.index, pd.DatetimeIndex):
-            raise ValueError("data_feed_df must have a DatetimeIndex for walk-forward optimization.")
-
-        full_data = self.data_feed_df.copy()
-        n_total_bars = len(full_data)
-
-        if training_period_bars + testing_period_bars > n_total_bars:
-            logger.error("Not enough data for even one training/testing period in WFO.")
-            return []
-
-        results_over_time = []
-        start_idx = 0
-
-        logger.info(f"Starting Walk-Forward Optimization. Train: {training_period_bars}, Test: {testing_period_bars}, Step: {step_size_bars}")
-
-        original_full_data_feed = self.data_feed_df # Store the original full data feed reference
-
-        while start_idx + training_period_bars <= n_total_bars: # Ensure training period is within bounds
-            train_end_idx = start_idx + training_period_bars
-            test_start_idx = train_end_idx
-            test_end_idx = min(test_start_idx + testing_period_bars, n_total_bars) # Don't go beyond total bars
-
-            if test_start_idx >= test_end_idx : # No testing data left
-                break
-
-            training_data = full_data.iloc[start_idx:train_end_idx]
-            testing_data = full_data.iloc[test_start_idx:test_end_idx]
-    
-            logger.info(f"WFO Step: Training from {training_data.index[0]} to {training_data.index[-1]} ({len(training_data)} bars)")
-    
-            self.data_feed_df = training_data # Temporarily set data_feed_df for optimization methods
-
-            best_params_for_step: Optional[Dict[str, Any]] = None
-            train_metric_value = -float('inf')
-
-            if optimization_method == 'grid_search':
-                best_params_for_step, train_metric_value, _ = self.grid_search()
-            elif optimization_method == 'optuna':
-                study_name_wfo = f"{self.strategy_class.__name__}_WFO_Step_{start_idx}"
-                best_params_for_step, train_metric_value, _ = self.optuna_optimize(n_trials=optuna_n_trials_per_step, study_name=study_name_wfo)
-            else:
-                logger.error(f"Unsupported optimization_method: {optimization_method}")
-                self.data_feed_df = original_full_data_feed # Restore
-                return results_over_time
-
-            if best_params_for_step:
-                logger.info(f"WFO Step: Best params from training: {best_params_for_step} (Metric: {train_metric_value:.4f})")
-                logger.info(f"WFO Step: Testing from {testing_data.index[0]} to {testing_data.index[-1]} ({len(testing_data)} bars) with best params.")
-        
-                test_metric_value = self._run_backtest_for_params(best_params_for_step, testing_data)
-        
-                results_over_time.append({
-                    'train_start_date': training_data.index[0],
-                    'train_end_date': training_data.index[-1],
-                    'test_start_date': testing_data.index[0],
-                    'test_end_date': testing_data.index[-1],
-                    'best_params': best_params_for_step,
-                    f'train_{self.optimization_metric}': train_metric_value,
-                    f'test_{self.optimization_metric}': test_metric_value
-                })
-                logger.info(f"WFO Step: Test period {self.optimization_metric}: {test_metric_value:.4f}")
-            else:
-                logger.warning("WFO Step: No best parameters found in training phase. Skipping test for this step.")
-
-            start_idx += step_size_bars
-
-        self.data_feed_df = original_full_data_feed # Restore original full data feed
-        logger.info("Walk-Forward Optimization completed.")
-        return results_over_time
 </code>
 
 kamikaze_komodo/backtesting_engine/engine.py:
 <code>
 # FILE: kamikaze_komodo/backtesting_engine/engine.py
 import pandas as pd
-from typing import List, Dict, Any, Optional, Tuple, Union
+import pandas_ta as ta
+from typing import List, Dict, Any, Optional
+from collections import deque
+import numpy as np
+import asyncio
+import os
+
 from kamikaze_komodo.core.models import BarData, Trade, Order, PortfolioSnapshot
 from kamikaze_komodo.core.enums import SignalType, OrderSide, TradeResult, OrderType
 from kamikaze_komodo.app_logger import get_logger, logger as root_logger
 from datetime import datetime, timezone, timedelta
 from kamikaze_komodo.orchestration.portfolio_manager import PortfolioManager
-from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
+from kamikaze_komodo.config.settings import settings
+from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, ATRStopManager, PercentageStopManager, TripleBarrierStopManager
 from kamikaze_komodo.data_handling.database_manager import DatabaseManager
 from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
-import os
-import asyncio
-from collections import deque
-import numpy as np
-
-# Import risk control modules
-from kamikaze_komodo.risk_control_module.stop_manager import BaseStopManager, ATRStopManager, PercentageStopManager, TripleBarrierStopManager
-from kamikaze_komodo.risk_control_module.volatility_band_stop_manager import VolatilityBandStopManager
-
 
 logger = get_logger(__name__)
 
-# Mapping of Stop Manager names in config to their classes
 STOP_MANAGER_CLASS_MAP = {
-    "ATRBased": ATRStopManager,
-    "PercentageBased": PercentageStopManager,
+    "ATRStopManager": ATRStopManager,
+    "PercentageStopManager": PercentageStopManager,
+    "TripleBarrierStopManager": TripleBarrierStopManager,
     "TripleBarrier": TripleBarrierStopManager,
-    "VolatilityBand": VolatilityBandStopManager,
 }
-
 
 class SimulatedExchangeAPI:
     def __init__(self, engine: 'BacktestingEngine'):
         self._engine = engine
-        logger.info("SimulatedExchangeAPI initialized for backtesting.")
 
     async def create_order(self, symbol: str, type: OrderType, side: OrderSide, amount: float, price: Optional[float] = None, params: Optional[Dict] = None) -> Order:
         return self._engine._execute_order(symbol, side, amount, type, price)
@@ -4218,85 +4238,67 @@ class SimulatedExchangeAPI:
 class BacktestingEngine:
     def __init__(
         self,
-        portfolio_manager_class: type,
+        portfolio_manager: PortfolioManager,
         data_feeds: Dict[str, pd.DataFrame],
         initial_capital: float = 10000.0,
         commission_bps: float = 0.0,
         slippage_bps: float = 0.0,
+        stop_manager: Optional[BaseStopManager] = None,
     ):
         if not data_feeds: raise ValueError("data_feeds dictionary cannot be empty.")
         
         self.data_feeds = {symbol: df.sort_index() for symbol, df in data_feeds.items()}
+        for asset, df in self.data_feeds.items():
+            if all(col in df.columns for col in ['high', 'low', 'close']):
+                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+
         self.initial_capital = initial_capital
         self.commission_rate = commission_bps / 10000.0
         self.slippage_rate = slippage_bps / 10000.0
+        
+        self.simulated_exchange = SimulatedExchangeAPI(self)
+        self.portfolio_manager = portfolio_manager
+        self.portfolio_manager.exchange_api = self.simulated_exchange
+
+        if stop_manager:
+            self.stop_manager = stop_manager
+        else:
+            self.stop_manager = self._initialize_stop_manager()
 
         self.current_cash = initial_capital
         self.current_portfolio_value = initial_capital
-        self.open_positions: Dict[str, deque[Trade]] = {symbol: deque() for symbol in self.data_feeds.keys()}
+        self.open_positions: Dict[str, Trade] = {}
         self.completed_trades_log: List[Trade] = []
         self.portfolio_history: List[Dict[str, Any]] = []
         self.order_id_counter = 0
-
-        self.simulated_exchange = SimulatedExchangeAPI(self)
-        self.portfolio_manager = portfolio_manager_class(exchange_api=self.simulated_exchange)
         
-        # --- NEW: Initialize Stop Manager ---
-        self.stop_manager = self._initialize_stop_manager()
-
-        logger.info(f"BacktestingEngine initialized. Stop Manager: {self.stop_manager.__class__.__name__}")
+        logger.info(f"BacktestingEngine initialized. Stop Manager: {self.stop_manager.__class__.__name__ if self.stop_manager else 'None'}")
 
     def _initialize_stop_manager(self) -> BaseStopManager:
-        """Dynamically initializes the stop manager from config settings."""
         stop_manager_name = settings.config.get('RiskManagement', 'StopManager_Default', fallback='PercentageStopManager')
         stop_manager_class = STOP_MANAGER_CLASS_MAP.get(stop_manager_name)
         if not stop_manager_class:
-            logger.error(f"StopManager '{stop_manager_name}' not found in map. Defaulting to PercentageStopManager.")
+            logger.error(f"StopManager '{stop_manager_name}' not found. Defaulting to PercentageStopManager.")
             stop_manager_class = PercentageStopManager
-
-        params = settings.get_strategy_params('RiskManagement')
+        
+        params = settings.get_strategy_params(stop_manager_name) or settings.get_strategy_params('RiskManagement')
         return stop_manager_class(params=params)
 
-
     @classmethod
-    async def create(cls, portfolio_manager_class: type, initial_capital: float, commission_bps: float, slippage_bps: float) -> 'BacktestingEngine':
-        root_logger.info("--- BacktestingEngine: Loading Data Feeds ---")
+    async def create(cls, portfolio_manager: PortfolioManager, initial_capital: float, commission_bps: float, slippage_bps: float) -> 'BacktestingEngine':
+        root_logger.info("--- BacktestingEngine: Loading Data Feeds via create() ---")
         if not settings: raise ValueError("Settings cannot be loaded.")
         data_feeds = await cls._load_data_feeds_async()
-        return cls(portfolio_manager_class, data_feeds, initial_capital, commission_bps, slippage_bps)
+        return cls(portfolio_manager, data_feeds, initial_capital, commission_bps, slippage_bps)
 
     @staticmethod
     async def _load_data_feeds_async() -> Dict[str, pd.DataFrame]:
         data_feeds = {}
-        # 1. Load Sentiment Data (if configured)
-        sentiment_df: Optional[pd.DataFrame] = None
-        if settings.simulated_sentiment_data_path and settings.enable_sentiment_analysis:
-            sentiment_csv_path = settings.simulated_sentiment_data_path
-            logger.info(f"Attempting to load simulated sentiment data from: {sentiment_csv_path}")
-            if os.path.exists(sentiment_csv_path):
-                try:
-                    sentiment_df = pd.read_csv(sentiment_csv_path, parse_dates=['timestamp'], index_col='timestamp')
-                    if sentiment_df.index.tz is None:
-                        sentiment_df.index = sentiment_df.index.tz_localize('UTC')
-                    else:
-                        sentiment_df.index = sentiment_df.index.tz_convert('UTC')
-                    if 'sentiment_score' not in sentiment_df.columns:
-                        sentiment_df = None
-                    else:
-                        logger.info(f"Successfully loaded {len(sentiment_df)} simulated sentiment entries.")
-                except Exception as e:
-                    sentiment_df = None
-                    logger.error(f"Error loading simulated sentiment data from {sentiment_csv_path}: {e}", exc_info=True)
-            else:
-                logger.warning(f"Simulated sentiment data file NOT FOUND at: {sentiment_csv_path}. Proceeding without sentiment.")
-
-        # 2. Load Market Data for all assets in the universe
         portfolio_config = settings.get_strategy_params('Portfolio')
         trading_universe: List[str] = [s.strip() for s in portfolio_config.get('tradinguniverse', '').split(',')]
         timeframe = settings.default_timeframe
         
-        if not trading_universe or trading_universe == ['']:
-            return {}
+        if not trading_universe or trading_universe == ['']: return {}
 
         db_manager = DatabaseManager()
         data_fetcher = DataFetcher()
@@ -4314,50 +4316,6 @@ class BacktestingEngine:
                 df = pd.DataFrame([bar.model_dump() for bar in bars])
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
-                
-                if sentiment_df is not None and not sentiment_df.empty:
-                    sentiment_df_unique = sentiment_df[~sentiment_df.index.duplicated(keep='last')] if not sentiment_df.index.is_unique else sentiment_df
-                    aligned_sentiment = sentiment_df_unique.reindex(df.index, method='ffill')
-                    df['sentiment_score'] = aligned_sentiment['sentiment_score']
-
-                if 'sentiment_score' not in df.columns: df['sentiment_score'] = 0.0
-                else: df['sentiment_score'] = df['sentiment_score'].fillna(0.0)
-
-                # --- NEW: Phase 7 - Add Market Regime ---
-                if settings.config.getboolean('Portfolio', 'EnableRegimeFilter', fallback=False):
-                    logger.info(f"Regime filter enabled. Calculating regimes for {asset}...")
-                    from kamikaze_komodo.ml_models.regime_detection.kmeans_regime_model import KMeansRegimeModel
-                    
-                    # Construct model path
-                    model_params = settings.get_strategy_params("KMeans_Regime_Model")
-                    _model_base_path = model_params.get('modelsavepath', 'ml_models/trained_models')
-                    _model_filename = model_params.get('modelfilename', f"kmeans_regime_{asset.replace('/', '_').lower()}_{timeframe}.joblib")
-                    
-                    if not os.path.isabs(_model_base_path):
-                        model_save_path_dir = os.path.join(PROJECT_ROOT, _model_base_path)
-                    else:
-                        model_save_path_dir = _model_base_path
-                    model_full_path = os.path.join(model_save_path_dir, _model_filename)
-
-                    if os.path.exists(model_full_path):
-                        regime_model = KMeansRegimeModel(model_path=model_full_path, params=model_params)
-                        regime_series = regime_model.predict_series(df) # Use the new method
-                        if regime_series is not None:
-                            df['market_regime'] = regime_series
-                            logger.info(f"Market regime column added for {asset}. Found regimes: {df['market_regime'].dropna().unique().tolist()}")
-                        else:
-                            logger.warning(f"Failed to calculate regime series for {asset}. Proceeding without it.")
-                            df['market_regime'] = np.nan
-                    else:
-                        logger.warning(f"KMeans regime model not found at {model_full_path}. Cannot apply regime filter for {asset}.")
-                        logger.warning("Run 'python -m kamikaze_komodo.ml_models.training_pipelines.kmeans_regime_pipeline' to train and save the model.")
-                        df['market_regime'] = np.nan
-                
-                # Ensure column exists even if filter is disabled
-                if 'market_regime' not in df.columns:
-                    df['market_regime'] = np.nan
-                # --- END NEW ---
-
                 data_feeds[asset] = df
                 logger.info(f"Loaded {len(df)} bars for {asset}.")
             else:
@@ -4369,7 +4327,6 @@ class BacktestingEngine:
         if not data_feeds:
             raise ValueError("No data could be loaded for any asset in the universe. Aborting backtest.")
         return data_feeds
-
 
     def _get_next_order_id(self) -> str:
         self.order_id_counter += 1
@@ -4387,92 +4344,90 @@ class BacktestingEngine:
         order_id = self._get_next_order_id()
         commission = (amount * execution_price) * self.commission_rate
 
-        is_closing_trade = self.open_positions[symbol] and side != self.open_positions[symbol][0].side
-
-        if is_closing_trade:
-            closing_amount_left = amount
-            while closing_amount_left > 1e-9 and self.open_positions[symbol]:
-                open_trade = self.open_positions[symbol][0]
-                close_qty = min(closing_amount_left, open_trade.amount)
-
-                if open_trade.side == OrderSide.BUY:
-                    pnl = (execution_price - open_trade.entry_price) * close_qty
-                else:
-                    pnl = (open_trade.entry_price - execution_price) * close_qty
-
-                prorated_commission = commission * (close_qty / amount) if amount > 0 else commission
-                self.current_cash += pnl - prorated_commission
-
-                completed_trade = open_trade.copy(deep=True)
-                completed_trade.amount = close_qty
-                completed_trade.exit_price = execution_price
-                completed_trade.exit_timestamp = current_bar.timestamp
-                completed_trade.exit_order_id = order_id
-                completed_trade.pnl = pnl - completed_trade.commission - prorated_commission
-                completed_trade.commission += prorated_commission
-                completed_trade.result = TradeResult.WIN if completed_trade.pnl > 0 else (TradeResult.LOSS if completed_trade.pnl < 0 else TradeResult.BREAKEVEN)
-                completed_trade.notes = "Closed by Stop-Loss" if from_stop else "Closed by Strategy Signal"
-                self.completed_trades_log.append(completed_trade)
-
-                if close_qty < open_trade.amount:
-                    open_trade.amount -= close_qty
-                else:
-                    self.open_positions[symbol].popleft()
-                closing_amount_left -= close_qty
-        else:
-            self.current_cash -= commission
-            new_trade = Trade(id=order_id, symbol=symbol, side=side, amount=amount, entry_price=execution_price,
-                              entry_timestamp=current_bar.timestamp, entry_order_id=order_id, commission=commission,
-                              custom_fields={"entry_bar_index": self.current_bar_index, "atr_at_entry": current_bar.atr})
-            self.open_positions[symbol].append(new_trade)
-
-        return Order(id=order_id, symbol=symbol, type=order_type, side=side, amount=amount, price=execution_price, timestamp=current_bar.timestamp, status='filled')
-
-    def _update_portfolio_history(self, timestamp: datetime):
-        unrealized_pnl = 0.0
-        for symbol, position_queue in self.open_positions.items():
-            if not position_queue: continue
-            if symbol in self.current_bars:
-                current_price = self.current_bars[symbol].close
-                for trade in position_queue:
-                    if trade.side == OrderSide.BUY:
-                        unrealized_pnl += (current_price - trade.entry_price) * trade.amount
-                    else:
-                        unrealized_pnl += (trade.entry_price - current_price) * trade.amount
+        position = self.open_positions.get(symbol)
         
-        self.current_portfolio_value = self.current_cash + unrealized_pnl
+        if position and position.side != side:
+            # Closing or reversing position
+            close_amount = min(amount, position.amount)
+            pnl = (execution_price - position.entry_price) * close_amount if position.side == OrderSide.BUY else (position.entry_price - execution_price) * close_amount
+            self.current_cash += pnl - commission
 
-        self.portfolio_history.append({"timestamp": timestamp, "cash": self.current_cash, "unrealized_pnl": unrealized_pnl, "total_value": self.current_portfolio_value})
+            position.amount -= close_amount
+            if position.amount < 1e-9:
+                closed_trade = self.open_positions.pop(symbol)
+                closed_trade.exit_price = execution_price
+                closed_trade.exit_timestamp = current_bar.timestamp
+                closed_trade.exit_order_id = order_id
+                closed_trade.pnl = pnl - closed_trade.commission
+                self.completed_trades_log.append(closed_trade)
 
-        positions_summary = {s: (sum(t.amount for t in q) if q[0].side == OrderSide.BUY else -sum(t.amount for t in q)) if q else 0.0 for s, q in self.open_positions.items()}
+            if amount > close_amount: # Reversal
+                new_amount = amount - close_amount
+                trade = Trade(
+                    id=order_id, entry_order_id=order_id, symbol=symbol, side=side, amount=new_amount,
+                    entry_price=execution_price, entry_timestamp=current_bar.timestamp, commission=0,
+                    custom_fields={"atr_at_entry": self.data_feeds[symbol].loc[current_bar.timestamp].get('atr')}
+                )
+                self.open_positions[symbol] = trade
+        else:
+            # Opening or increasing position
+            new_amount = amount + (position.amount if position else 0)
+            new_entry_price = ((position.entry_price * position.amount) + (execution_price * amount)) / new_amount if position else execution_price
+            
+            if position:
+                position.entry_price = new_entry_price
+                position.amount = new_amount
+                position.commission += commission
+            else:
+                trade = Trade(
+                    id=order_id, entry_order_id=order_id, symbol=symbol, side=side, amount=amount,
+                    entry_price=execution_price, entry_timestamp=current_bar.timestamp, commission=commission,
+                    custom_fields={"atr_at_entry": self.data_feeds[symbol].loc[current_bar.timestamp].get('atr')}
+                )
+                self.open_positions[symbol] = trade
+        
+        return Order(
+            id=order_id, symbol=symbol, type=order_type, side=side, amount=amount, price=execution_price,
+            timestamp=current_bar.timestamp, status='filled'
+        )
+        
+    def _update_portfolio_history(self, timestamp: datetime):
+        open_pnl = 0
+        positions_value = 0
+        for symbol, position in self.open_positions.items():
+            current_price = self.current_bars.get(symbol, position).close
+            positions_value += position.amount * current_price
+            pnl = (current_price - position.entry_price) * position.amount if position.side == OrderSide.BUY else (position.entry_price - current_price) * position.amount
+            open_pnl += pnl
+        
+        self.current_portfolio_value = self.current_cash + positions_value
+        self.portfolio_history.append({"timestamp": timestamp, "cash": self.current_cash, "unrealized_pnl": open_pnl, "total_value": self.current_portfolio_value})
+        positions_summary = {s: p.amount if p.side == OrderSide.BUY else -p.amount for s, p in self.open_positions.items()}
         self.portfolio_manager.portfolio_snapshot = PortfolioSnapshot(timestamp=timestamp, total_value_usd=self.current_portfolio_value, cash_balance_usd=self.current_cash, positions=positions_summary)
     
-    def _check_and_execute_stops(self, timestamp: datetime):
-        """NEW: Iterates through open positions and applies stop manager logic."""
+    def _check_stops(self, timestamp: datetime):
         if not self.stop_manager: return
         
-        positions_to_close = []
-        for symbol, position_queue in self.open_positions.items():
-            if not position_queue or symbol not in self.current_bars:
+        trades_to_close = []
+        for symbol, trade in list(self.open_positions.items()):
+            current_bar = self.current_bars.get(symbol)
+            if not current_bar: continue
+            
+            stop_price = self.stop_manager.check_stop_loss(trade, current_bar, self.current_bar_index)
+            if stop_price:
+                trades_to_close.append({'trade': trade, 'price': stop_price})
                 continue
-                
-            latest_bar = self.current_bars[symbol]
-            # Check stops for each open trade fragment (FIFO)
-            for trade in list(position_queue): # Iterate over a copy
-                stop_price = self.stop_manager.check_stop_loss(trade, latest_bar, self.current_bar_index)
-                if stop_price:
-                    positions_to_close.append({'symbol': symbol, 'side': OrderSide.SELL if trade.side == OrderSide.BUY else OrderSide.BUY, 'amount': trade.amount, 'price': stop_price})
-                    continue # Move to next symbol if stop is hit
-                    
-                tp_price = self.stop_manager.check_take_profit(trade, latest_bar)
-                if tp_price:
-                    positions_to_close.append({'symbol': symbol, 'side': OrderSide.SELL if trade.side == OrderSide.BUY else OrderSide.BUY, 'amount': trade.amount, 'price': tp_price})
-        
-        # Execute closing orders for any triggered stops
-        for closing_order in positions_to_close:
-            logger.info(f"STOP TRIGGERED: Executing closing order for {closing_order['symbol']}.")
-            self._execute_order(symbol=closing_order['symbol'], side=closing_order['side'], amount=closing_order['amount'], order_type=OrderType.MARKET, price=closing_order['price'], from_stop=True)
+            
+            tp_price = self.stop_manager.check_take_profit(trade, current_bar)
+            if tp_price:
+                trades_to_close.append({'trade': trade, 'price': tp_price})
 
+        for item in trades_to_close:
+            trade = item['trade']
+            price = item['price']
+            logger.info(f"STOP TRIGGERED: Closing trade {trade.id} on {trade.symbol}.")
+            closing_side = OrderSide.SELL if trade.side == OrderSide.BUY else OrderSide.BUY
+            self._execute_order(symbol=trade.symbol, side=closing_side, amount=trade.amount, order_type=OrderType.MARKET, price=price, from_stop=True)
 
     async def run(self) -> tuple[List[Trade], Dict[str, Any], pd.DataFrame]:
         logger.info("Starting portfolio backtest run...")
@@ -4491,17 +4446,22 @@ class BacktestingEngine:
             has_new_data_for_cycle = False
             for asset, df in self.data_feeds.items():
                 if timestamp in df.index:
-                    if not has_new_data_for_cycle: has_new_data_for_cycle = True
+                    has_new_data_for_cycle = True
                     historical_data_slice[asset] = df.loc[:timestamp]
-                    self.current_bars[asset] = BarData(timestamp=timestamp, **df.loc[timestamp].to_dict())
+                    
+                    bar_data_dict = df.loc[timestamp].to_dict()
+                    bar_data_dict.pop('symbol', None)
+                    bar_data_dict.pop('timeframe', None)
+                    
+                    for key, value in bar_data_dict.items():
+                        if isinstance(value, float) and np.isnan(value):
+                            bar_data_dict[key] = None
+                            
+                    self.current_bars[asset] = BarData(timestamp=timestamp, symbol=asset, timeframe=self.portfolio_manager.timeframe, **bar_data_dict)
             
             self._update_portfolio_history(timestamp)
+            self._check_stops(timestamp)
 
-            # --- INTEGRATION OF RISK MODULE ---
-            # 1. Check for stop-loss / take-profit triggers before strategy logic for the new bar
-            self._check_and_execute_stops(timestamp)
-
-            # 2. Run the portfolio manager's cycle for new signals
             if has_new_data_for_cycle:
                 await self.portfolio_manager.run_cycle(historical_data_for_cycle=historical_data_slice)
 
@@ -4619,8 +4579,8 @@ class Config:
         # VertexAI Settings
         self.vertex_ai_project_id: Optional[str] = self.config.get('VertexAI', 'ProjectID', fallback=None)
         self.vertex_ai_location: Optional[str] = self.config.get('VertexAI', 'Location', fallback=None)
-        self.vertex_ai_sentiment_model_name: str = self.config.get('VertexAI', 'SentimentModelName', fallback='gemini-2.5-flash-preview-05-20')
-        self.vertex_ai_browser_agent_model_name: str = self.config.get('VertexAI', 'BrowserAgentModelName', fallback='gemini-2.5-flash-preview-05-20')
+        self.vertex_ai_sentiment_model_name: str = self.config.get('VertexAI', 'SentimentModelName', fallback='gemini-1.5-flash-preview-0514')
+        self.vertex_ai_browser_agent_model_name: str = self.config.get('VertexAI', 'BrowserAgentModelName', fallback='gemini-1.5-flash-preview-0514')
 
         if self.vertex_ai_project_id and self.vertex_ai_project_id.lower() == 'your-gcp-project-id':
             logger.warning("Vertex AI ProjectID is set to 'your-gcp-project-id'. Please update it in config.ini.")
@@ -4733,109 +4693,91 @@ KrakenTestnet = True
 [DataFetching]
 DefaultSymbol = PF_XBTUSD
 DefaultTimeframe = 4h
-# Increased for more training data
-HistoricalDataDays = 730 
+HistoricalDataDays = 730 
 DataFetchLimitPerCall = 500
 
 [Trading]
-MaxPortfolioRisk = 0.02
-DefaultLeverage = 1.0
 CommissionBPS = 10
 SlippageBPS = 2
-FundingRateAnnualized = 0.00
 
-# Phase 7: Portfolio Configuration
+# --- PORTFOLIO CONFIGURATION ---
+# This section defines the overall portfolio for the main backtest run.
 [Portfolio]
-TradingUniverse = PF_XBTUSD, PF_ETHUSD
-# Activate a mix of strategies, including the new funding rate and ML strategies
-ActiveStrategies = EWMAC_Strategy, FundingRateArb_Strategy, MLForecaster_Strategy
+# We are focusing the universe on the single asset we optimized.
+TradingUniverse = PF_XBTUSD
+# We are activating only the single best strategy found by the optimizer.
+ActiveStrategies = EhlersInstantaneousTrendline_Strategy
+# For a single asset, HRP falls back to 100% allocation, which is what we want.
 AssetAllocator = HRPAllocator
 Rebalancer = BasicRebalancer
-# --- Phase 7: Regime Filter ---
-EnableRegimeFilter = True
+EnableRegimeFilter = False
 
 [Backtesting]
 InitialCapital = 10000.0
 
-[EWMAC_Strategy]
-ShortWindow = 12
-LongWindow = 26
-SignalWindow = 9
-atr_period = 14
-SentimentFilter_Long_Threshold = 0.05
-SentimentFilter_Short_Threshold = -0.05
-EnableShorting = True
-# --- Phase 7: Regime Filter ---
-UseRegimeFilter = True
-# Defines which cluster IDs from the KMeans model are considered "trending" and thus favorable for this strategy.
-# This requires manual analysis of the trained KMeans model's cluster centers.
-# Assuming cluster '1' is the high-volatility, trending regime.
-FavorableRegimes = 1
 
-# --- NEW: Funding Rate Arbitrage Strategy ---
-[FundingRateArb_Strategy]
-# Enter a short if funding rate is > 0.01% (per period, not annualized)
-entry_threshold = 0.0001
-# Exit if funding rate drops below 0.005%
-exit_threshold = 0.00005
+# === STRATEGY-SPECIFIC PARAMETERS ===
+
+# --- This is the winning strategy with its optimized parameter ---
+[EhlersInstantaneousTrendline_Strategy]
+it_lag_trigger = 2
+atr_period = 14
 EnableShorting = True
+
+
+# === RISK MANAGEMENT PARAMETERS ===
 
 [RiskManagement]
+# This defines the DEFAULT Stop Manager to use.
 StopManager_Default = TripleBarrier
-# --- Position Sizer Params ---
-PositionSizer = MLConfidencePositionSizer
-# Base allocation is 10% of portfolio
-MLConfidence_Base_Fraction = 0.10
-MLConfidence_Min_Alloc_Fraction = 0.02
-MLConfidence_Max_Alloc_Fraction = 0.25
-# --- Stop Manager Params (for Triple Barrier) ---
-TripleBarrier_TP_Multiple = 1.5
-TripleBarrier_SL_Multiple = 1.0
-TripleBarrier_Time_Limit_Bars = 15
-ATRStop_ATRMultiple = 2.0
+
+# --- This is the dedicated section for the TripleBarrier Stop Manager ---
+# --- The program will now correctly load these optimized values. ---
+[TripleBarrier]
+TripleBarrier_TP_Multiple = 2.0
+TripleBarrier_SL_Multiple = 2.0
+TripleBarrier_Time_Limit_Bars = 20
 
 
-[PortfolioConstructor]
-AssetAllocator = HRPAllocator # Ensure this is set
-Rebalancer_DeviationThreshold = 0.05
+# --- Other sections are kept for reference ---
 
 [Rebalancer]
-Rebalancer_DeviationThreshold = 0.02
 Rebalancer_Min_Order_Value_USD = 10.0
 
-[AI_NewsAnalysis]
-EnableSentimentAnalysis = True
-SimulatedSentimentDataPath = kamikaze_komodo/data/simulated_sentiment_data.csv
-# Other params unchanged...
-
-[VertexAI]
-# Unchanged...
-ProjectID = kamikazekomodo
-Location = us-central1
-
-# --- UPDATED: MLForecaster_Strategy now points to meta-labeling config ---
-[MLForecaster_Strategy]
-# This section now controls the live strategy's behavior
-# Enter long if meta model confidence > 55%
-longconfidencethreshold = 0.55
-# Enter short if meta model confidence > 55%
-shortconfidencethreshold = 0.55
-atr_period = 14
-EnableShorting = True
-
-# FIX: Re-add the missing section for performance analysis
 [BacktestingPerformance]
 RiskFreeRateAnnual = 0.02
 AnnualizationFactor = 252
 
-# --- This section is for the K-Means model itself ---
+[EWMAC_Strategy]
+ShortWindow = 12
+LongWindow = 26
+EnableShorting = True
+
+[FundingRateArb_Strategy]
+entry_threshold = 0.0001
+exit_threshold = 0.00005
+EnableShorting = True
+
+[MLForecaster_Strategy]
+longconfidencethreshold = 0.55
+shortconfidencethreshold = 0.55
+atr_period = 14
+EnableShorting = True
+
 [KMeans_Regime_Model]
 Num_Clusters = 3
-# Features should be calculated by the model. These names guide which features to create.
 FeaturesForClustering = volatility_20d, atr_14d_percentage
 TrainingDaysHistory = 1095
 ModelSavePath = ml_models/trained_models
 ModelFileName = kmeans_regime_PF_XBTUSD_4h.joblib
+
+[AI_NewsAnalysis]
+EnableSentimentAnalysis = False
+SimulatedSentimentDataPath = kamikaze_komodo/data/simulated_sentiment_data.csv
+
+[VertexAI]
+ProjectID = kamikazekomodo
+Location = us-central1
 </code>
 
 kamikaze_komodo/core/enums.py:
@@ -6312,7 +6254,7 @@ kamikaze_komodo/strategy_framework/strategies/ehlers_instantaneous_trendline.py:
 <code>
 # kamikaze_komodo/strategy_framework/strategies/ehlers_instantaneous_trendline.py
 import pandas as pd
-import pandas_ta as ta # pandas_ta might not have Ehlers' IT directly, may need custom impl.
+import pandas_ta as ta
 import numpy as np
 from typing import Dict, Any, Optional, Union, List
 from kamikaze_komodo.strategy_framework.base_strategy import BaseStrategy, SignalCommand
@@ -6324,161 +6266,68 @@ logger = get_logger(__name__)
 
 class EhlersInstantaneousTrendlineStrategy(BaseStrategy):
     """
-    Implements Ehlers' Instantaneous Trendline strategy.
-    This is a simplified version focusing on the trendline crossover.
-    The Instantaneous Trendline is a 2-bar lookback Finite Impulse Response (FIR) filter.
-    A common way to use it is with a trigger line (e.g., delayed trendline).
-    Source: "Rocket Science for Traders" by John Ehlers, Chapter 3.
-    Phase 6: Added shorting capability.
+    Implements a stateless Ehlers' Instantaneous Trendline strategy.
+    It generates entry signals only. Exits are handled by the StopManager.
     """
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(symbol, timeframe, params)
-        # Alpha for smoothing, if desired (not part of core IT calculation directly but often used with Ehlers' indicators)
-        # Default to a common value if not specified, e.g. for smoothing price before IT calc or the IT line itself.
-        # However, the core IT is (Close + 2*Close[-1] + Close[-2]) / 4
-        self.alpha = float(self.params.get('alpha', 0.07)) # Example if smoothing was used for other Ehlers indicators
-        self.it_lag_trigger = int(self.params.get('it_lag_trigger', 1)) # Lag for the trigger line (e.g. IT lagged by 1 bar)
-        
+        self.it_lag_trigger = int(self.params.get('it_lag_trigger', 1))
+        self.atr_period = int(self.params.get('atr_period', 14))
+
         logger.info(
             f"Initialized EhlersInstantaneousTrendlineStrategy for {symbol} ({timeframe}) "
-            f"with IT Lag Trigger: {self.it_lag_trigger}. (Alpha: {self.alpha} is for general Ehlers context, not core IT). "
-            f"Shorting Enabled: {self.enable_shorting}"
+            f"with IT Lag Trigger: {self.it_lag_trigger}. Shorting Enabled: {self.enable_shorting}"
         )
-        # self.current_position_status is inherited from BaseStrategy
 
     def _calculate_indicators(self, data_df: pd.DataFrame) -> pd.DataFrame:
-        if data_df.empty: return data_df
+        if data_df.empty or 'close' not in data_df.columns or len(data_df) < 3:
+            return pd.DataFrame()
+
         df = data_df.copy()
-
-        if 'close' not in df.columns or len(df) < 3: # Need at least 3 bars for IT calculation
-            return df
-
-        # Ehlers' Instantaneous Trendline calculation:
-        # IT_t = (Close_t + 2*Close_t-1 + Close_t-2) / 4
         close_prices = df['close']
-        it_values = np.full(len(df), np.nan)
-        if len(close_prices) >= 3:
-            for i in range(2, len(close_prices)):
-                it_values[i] = (close_prices.iloc[i] + 2 * close_prices.iloc[i-1] + close_prices.iloc[i-2]) / 4
-        
+        # The core IT is a 3-bar filter, but we apply it over the series
+        it_values = (close_prices + 2 * close_prices.shift(1) + close_prices.shift(2)) / 4
         df['it'] = it_values
-        df['it_trigger'] = df['it'].shift(self.it_lag_trigger) # Lagged IT as a trigger
-
-        # ATR for BarData object (optional, but good practice)
+        df['it_trigger'] = df['it'].shift(self.it_lag_trigger)
+        
         if all(col in df.columns for col in ['high', 'low', 'close']):
-                atr_period = int(self.params.get('atr_period', 14))
-                if len(df) >= atr_period:
-                    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=atr_period)
-                else:
-                    df['atr'] = pd.NA
-        else:
-            df['atr'] = pd.NA
-            
+            if len(df) >= self.atr_period:
+                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
         return df
 
     def generate_signals(self, data: pd.DataFrame, sentiment_series: Optional[pd.Series] = None) -> pd.Series:
-        if data.empty or len(data) < 3 + self.it_lag_trigger: # Need enough for IT and its lag
-            logger.warning(f"Not enough historical data for Ehlers IT signals. Need {3 + self.it_lag_trigger}, got {len(data)}.")
-            return pd.Series(index=data.index, dtype='object')
-
-        df_processed = self._calculate_indicators(data)
-
-        if 'it' not in df_processed.columns or 'it_trigger' not in df_processed.columns:
-            return pd.Series(index=data.index, dtype='object')
-
-        signals = pd.Series(index=df_processed.index, dtype='object').fillna(SignalType.HOLD)
-        current_pos_state: Optional[SignalType] = None
-
-        for i in range(1, len(df_processed)): # Start from 1 to compare with previous
-            # Ensure all values are non-NaN for comparison
-            if pd.isna(df_processed['it'].iloc[i]) or \
-               pd.isna(df_processed['it_trigger'].iloc[i]) or \
-               pd.isna(df_processed['it'].iloc[i-1]) or \
-               pd.isna(df_processed['it_trigger'].iloc[i-1]):
-                signals.iloc[i] = SignalType.HOLD
-                continue
-
-            is_bullish_cross = df_processed['it'].iloc[i] > df_processed['it_trigger'].iloc[i] and \
-                                 df_processed['it'].iloc[i-1] <= df_processed['it_trigger'].iloc[i-1]
-            
-            is_bearish_cross = df_processed['it'].iloc[i] < df_processed['it_trigger'].iloc[i] and \
-                                 df_processed['it'].iloc[i-1] >= df_processed['it_trigger'].iloc[i-1]
-
-            if current_pos_state == SignalType.LONG:
-                if is_bearish_cross:
-                    signals.iloc[i] = SignalType.CLOSE_LONG
-                    current_pos_state = None
-                else:
-                    signals.iloc[i] = SignalType.HOLD
-            elif current_pos_state == SignalType.SHORT:
-                if is_bullish_cross:
-                    signals.iloc[i] = SignalType.CLOSE_SHORT
-                    current_pos_state = None
-                else:
-                    signals.iloc[i] = SignalType.HOLD
-            else: # No current position
-                if is_bullish_cross:
-                    signals.iloc[i] = SignalType.LONG
-                    current_pos_state = SignalType.LONG
-                elif is_bearish_cross and self.enable_shorting:
-                    signals.iloc[i] = SignalType.SHORT
-                    current_pos_state = SignalType.SHORT
-                else:
-                    signals.iloc[i] = SignalType.HOLD
-        
-        logger.info(f"Generated Ehlers IT signals. Longs: {signals.eq(SignalType.LONG).sum()}, Shorts: {signals.eq(SignalType.SHORT).sum()}, CloseLongs: {signals.eq(SignalType.CLOSE_LONG).sum()}, CloseShorts: {signals.eq(SignalType.CLOSE_SHORT).sum()}")
-        return signals
+        logger.warning("generate_signals is not the primary method for this strategy; logic is in on_bar_data.")
+        return pd.Series(index=data.index, dtype='object').fillna(SignalType.HOLD)
 
     def on_bar_data(self, bar_data: BarData, sentiment_score: Optional[float] = None, market_regime_data: Optional[Any] = None) -> Union[Optional[SignalType], List[SignalCommand]]:
         self.update_data_history(bar_data)
-        if len(self.data_history) < 3 + self.it_lag_trigger: # Need enough data for IT and its lag
+        if len(self.data_history) < 3 + self.it_lag_trigger:
             return SignalType.HOLD
 
-        df_with_indicators = self._calculate_indicators(self.data_history)
-        
-        if 'atr' in df_with_indicators.columns and pd.notna(df_with_indicators['atr'].iloc[-1]):
-                bar_data.atr = df_with_indicators['atr'].iloc[-1] # Update BarData with ATR
+        df = self._calculate_indicators(self.data_history)
+        if df.empty or len(df) < 2 or 'it' not in df.columns or 'it_trigger' not in df.columns:
+            return SignalType.HOLD
+            
+        if 'atr' in df.columns and pd.notna(df['atr'].iloc[-1]):
+            bar_data.atr = df['atr'].iloc[-1]
 
-        if df_with_indicators.empty or 'it' not in df_with_indicators.columns or \
-           'it_trigger' not in df_with_indicators.columns or len(df_with_indicators) < 2:
-            return SignalType.HOLD # Not enough data or indicator calculation failed
+        latest_it = df['it'].iloc[-1]
+        prev_it = df['it'].iloc[-2]
+        latest_it_trigger = df['it_trigger'].iloc[-1]
+        prev_it_trigger = df['it_trigger'].iloc[-2]
 
-        # Get latest and previous values for IT and its trigger
-        latest_it = df_with_indicators['it'].iloc[-1]
-        prev_it = df_with_indicators['it'].iloc[-2]
-        latest_it_trigger = df_with_indicators['it_trigger'].iloc[-1]
-        prev_it_trigger = df_with_indicators['it_trigger'].iloc[-2]
-
-        if pd.isna(latest_it) or pd.isna(prev_it) or \
-           pd.isna(latest_it_trigger) or pd.isna(prev_it_trigger):
-            return SignalType.HOLD # Not enough data for signal generation
-
-        signal_to_return = SignalType.HOLD
+        if any(pd.isna(v) for v in [latest_it, prev_it, latest_it_trigger, prev_it_trigger]):
+            return SignalType.HOLD
 
         is_bullish_cross = latest_it > latest_it_trigger and prev_it <= prev_it_trigger
         is_bearish_cross = latest_it < latest_it_trigger and prev_it >= prev_it_trigger
 
-        if self.current_position_status == SignalType.LONG:
-            if is_bearish_cross:
-                signal_to_return = SignalType.CLOSE_LONG
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - Ehlers IT CLOSE_LONG for {self.symbol}. IT: {latest_it:.2f}, Trigger: {latest_it_trigger:.2f}")
-        elif self.current_position_status == SignalType.SHORT:
-            if is_bullish_cross:
-                signal_to_return = SignalType.CLOSE_SHORT
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - Ehlers IT CLOSE_SHORT for {self.symbol}. IT: {latest_it:.2f}, Trigger: {latest_it_trigger:.2f}")
-        else: # No current position
-            if is_bullish_cross:
-                signal_to_return = SignalType.LONG
-                self.current_position_status = SignalType.LONG
-                logger.info(f"{bar_data.timestamp} - Ehlers IT LONG for {self.symbol}. IT: {latest_it:.2f}, Trigger: {latest_it_trigger:.2f}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-            elif is_bearish_cross and self.enable_shorting:
-                signal_to_return = SignalType.SHORT
-                self.current_position_status = SignalType.SHORT
-                logger.info(f"{bar_data.timestamp} - Ehlers IT SHORT for {self.symbol}. IT: {latest_it:.2f}, Trigger: {latest_it_trigger:.2f}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-            
-        return signal_to_return
+        if is_bullish_cross:
+            return SignalType.LONG
+        elif is_bearish_cross and self.enable_shorting:
+            return SignalType.SHORT
+        
+        return SignalType.HOLD
 </code>
 
 kamikaze_komodo/strategy_framework/strategies/__init__.py:
@@ -6502,224 +6351,76 @@ logger = get_logger(__name__)
 
 class BollingerBandBreakoutStrategy(BaseStrategy):
     """
-    Implements a Bollinger Band Breakout strategy.
-    Enters on price breakouts from Bollinger Bands, potentially filtered by volume or momentum.
-    Adaptable for long and short positions.
+    Implements a stateless Bollinger Band Breakout strategy.
+    Generates entry signals only. Exits are handled by the StopManager.
     """
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(symbol, timeframe, params)
         
         self.bb_period = int(self.params.get('bb_period', 20))
         self.bb_std_dev = float(self.params.get('bb_std_dev', 2.0))
-        self.atr_period = int(self.params.get('atr_period', 14)) # For ATR-based filters or stops
-
-        # Optional filters
-        self.volume_filter_enabled = str(self.params.get('volume_filter_enabled', 'false')).lower() == 'true'
-        self.volume_sma_period = int(self.params.get('volume_sma_period', 20))
-        self.volume_factor_above_sma = float(self.params.get('volume_factor_above_sma', 1.5))
-        self.min_breakout_atr_multiple = float(self.params.get('min_breakout_atr_multiple', 0.0)) # 0 means no filter
+        self.atr_period = int(self.params.get('atr_period', 14))
 
         logger.info(
             f"Initialized BollingerBandBreakoutStrategy for {symbol} ({timeframe}) "
-            f"with BB Period: {self.bb_period}, StdDev: {self.bb_std_dev}, ATR Period: {self.atr_period}. "
-            f"Volume Filter: {self.volume_filter_enabled} (SMA {self.volume_sma_period}, Factor {self.volume_factor_above_sma}). "
-            f"Min Breakout ATR Multiple: {self.min_breakout_atr_multiple}. Shorting Enabled: {self.enable_shorting}"
+            f"with BB Period: {self.bb_period}, StdDev: {self.bb_std_dev}. "
+            f"Shorting Enabled: {self.enable_shorting}"
         )
 
     def _calculate_indicators(self, data_df: pd.DataFrame) -> pd.DataFrame:
-        if data_df.empty: return data_df
+        if data_df.empty or len(data_df) < self.bb_period:
+            return pd.DataFrame()
+
         df = data_df.copy()
-
-        if 'close' not in df.columns or len(df) < self.bb_period:
-            return df
-
-        # Bollinger Bands
         try:
             bbands = ta.bbands(df['close'], length=self.bb_period, std=self.bb_std_dev)
             if bbands is not None and not bbands.empty:
-                df['bb_lower'] = bbands[f'BBL_{self.bb_period}_{self.bb_std_dev:.1f}'] # pandas_ta uses .1f for std in col name
-                df['bb_middle'] = bbands[f'BBM_{self.bb_period}_{self.bb_std_dev:.1f}']
+                df['bb_lower'] = bbands[f'BBL_{self.bb_period}_{self.bb_std_dev:.1f}']
                 df['bb_upper'] = bbands[f'BBU_{self.bb_period}_{self.bb_std_dev:.1f}']
-            else:
-                df['bb_lower'] = pd.NA
-                df['bb_middle'] = pd.NA
-                df['bb_upper'] = pd.NA
+
+            if all(col in df.columns for col in ['high', 'low', 'close']):
+                if len(df) >= self.atr_period:
+                    df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
+            return df
         except Exception as e:
-            logger.error(f"Error calculating Bollinger Bands: {e}")
-            df['bb_lower'] = pd.NA
-            df['bb_middle'] = pd.NA
-            df['bb_upper'] = pd.NA
-
-
-        # ATR
-        if all(col in df.columns for col in ['high', 'low', 'close']):
-            if len(df) >= self.atr_period:
-                df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
-            else:
-                df['atr'] = pd.NA
-        else:
-            df['atr'] = pd.NA
-        
-        # Volume SMA (if filter enabled)
-        if self.volume_filter_enabled and 'volume' in df.columns:
-            if len(df) >= self.volume_sma_period:
-                df['volume_sma'] = ta.sma(df['volume'], length=self.volume_sma_period)
-            else:
-                df['volume_sma'] = pd.NA
-        elif 'volume' not in df.columns and self.volume_filter_enabled:
-            logger.warning("Volume column not found for volume filter in BollingerBandBreakoutStrategy.")
-            df['volume_sma'] = pd.NA
-
-        return df
+            logger.error(f"Error calculating BBands indicators: {e}")
+            return pd.DataFrame()
 
     def generate_signals(self, data: pd.DataFrame, sentiment_series: Optional[pd.Series] = None) -> pd.Series:
-        if data.empty or len(data) < self.bb_period:
-            logger.warning(f"Not enough historical data for Bollinger Band Breakout signals. Need {self.bb_period}, got {len(data)}.")
-            return pd.Series(index=data.index, dtype='object')
-
-        df_processed = self._calculate_indicators(data)
-
-        if 'bb_upper' not in df_processed.columns or 'bb_lower' not in df_processed.columns:
-            logger.error("Bollinger Band columns not found after calculation. Cannot generate signals.")
-            return pd.Series(index=data.index, dtype='object')
-
-        signals = pd.Series(index=df_processed.index, dtype='object').fillna(SignalType.HOLD)
-        current_pos_state: Optional[SignalType] = None
-
-        for i in range(1, len(df_processed)): # Start from 1 to check previous bar conditions
-            close = df_processed['close'].iloc[i]
-            prev_close = df_processed['close'].iloc[i-1]
-            bb_upper = df_processed['bb_upper'].iloc[i]
-            prev_bb_upper = df_processed['bb_upper'].iloc[i-1] if i > 0 and 'bb_upper' in df_processed.columns and pd.notna(df_processed['bb_upper'].iloc[i-1]) else bb_upper
-
-            bb_lower = df_processed['bb_lower'].iloc[i]
-            prev_bb_lower = df_processed['bb_lower'].iloc[i-1] if i > 0 and 'bb_lower' in df_processed.columns and pd.notna(df_processed['bb_lower'].iloc[i-1]) else bb_lower
-            
-            atr = df_processed['atr'].iloc[i] if 'atr' in df_processed.columns and pd.notna(df_processed['atr'].iloc[i]) else None
-
-            if pd.isna(close) or pd.isna(prev_close) or pd.isna(bb_upper) or pd.isna(bb_lower) or pd.isna(prev_bb_upper) or pd.isna(prev_bb_lower):
-                continue
-
-            # Volume Filter Check
-            volume_condition_met = True
-            if self.volume_filter_enabled and 'volume' in df_processed.columns and 'volume_sma' in df_processed.columns:
-                current_volume = df_processed['volume'].iloc[i]
-                volume_sma = df_processed['volume_sma'].iloc[i]
-                if pd.notna(current_volume) and pd.notna(volume_sma) and volume_sma > 0: # ensure sma is not zero
-                    if current_volume < volume_sma * self.volume_factor_above_sma:
-                        volume_condition_met = False
-                # else: volume_condition_met remains True if data insufficient for filter
-            
-            # Breakout Candle Size Filter
-            breakout_candle_filter_met = True
-            if self.min_breakout_atr_multiple > 0 and atr is not None and atr > 0:
-                candle_range = abs(df_processed['high'].iloc[i] - df_processed['low'].iloc[i])
-                if candle_range < self.min_breakout_atr_multiple * atr:
-                    breakout_candle_filter_met = False
-
-
-            # Long entry: Close breaks above upper band
-            long_breakout = close > bb_upper and prev_close <= prev_bb_upper
-            
-            # Short entry: Close breaks below lower band
-            short_breakout = close < bb_lower and prev_close >= prev_bb_lower
-
-            if current_pos_state == SignalType.LONG:
-                # Exit Long: Price closes back inside, e.g., below upper band or hits middle band
-                if close < bb_upper: # Simple exit: re-enters band
-                    signals.iloc[i] = SignalType.CLOSE_LONG
-                    current_pos_state = None
-            elif current_pos_state == SignalType.SHORT:
-                 # Exit Short: Price closes back inside, e.g., above lower band or hits middle band
-                if close > bb_lower: # Simple exit: re-enters band
-                    signals.iloc[i] = SignalType.CLOSE_SHORT
-                    current_pos_state = None
-            else: # No position
-                if long_breakout and volume_condition_met and breakout_candle_filter_met:
-                    signals.iloc[i] = SignalType.LONG
-                    current_pos_state = SignalType.LONG
-                elif short_breakout and self.enable_shorting and volume_condition_met and breakout_candle_filter_met:
-                    signals.iloc[i] = SignalType.SHORT
-                    current_pos_state = SignalType.SHORT
-        
-        logger.info(f"Generated Bollinger Band Breakout signals. Longs: {signals.eq(SignalType.LONG).sum()}, Shorts: {signals.eq(SignalType.SHORT).sum()}, CloseLongs: {signals.eq(SignalType.CLOSE_LONG).sum()}, CloseShorts: {signals.eq(SignalType.CLOSE_SHORT).sum()}")
-        return signals
+        logger.warning("generate_signals is not the primary method for this strategy; logic is in on_bar_data.")
+        return pd.Series(index=data.index, dtype='object').fillna(SignalType.HOLD)
 
     def on_bar_data(self, bar_data: BarData, sentiment_score: Optional[float] = None, market_regime_data: Optional[Any] = None) -> Union[Optional[SignalType], List[SignalCommand]]:
         self.update_data_history(bar_data)
-        if len(self.data_history) < self.bb_period + 1: # Need enough data for BBands and prev close check
+        if len(self.data_history) < self.bb_period + 1:
             return SignalType.HOLD
 
-        df_with_indicators = self._calculate_indicators(self.data_history)
-        
-        if 'atr' in df_with_indicators.columns and pd.notna(df_with_indicators['atr'].iloc[-1]):
-            bar_data.atr = df_with_indicators['atr'].iloc[-1]
-
-        if df_with_indicators.empty or 'bb_upper' not in df_with_indicators.columns or \
-           'bb_lower' not in df_with_indicators.columns or len(df_with_indicators) < 2:
+        df = self._calculate_indicators(self.data_history)
+        if df.empty or len(df) < 2 or 'bb_upper' not in df.columns or 'bb_lower' not in df.columns:
             return SignalType.HOLD
 
-        latest_close = df_with_indicators['close'].iloc[-1]
-        prev_close = df_with_indicators['close'].iloc[-2]
-        latest_bb_upper = df_with_indicators['bb_upper'].iloc[-1]
-        prev_bb_upper = df_with_indicators['bb_upper'].iloc[-2] if pd.notna(df_with_indicators['bb_upper'].iloc[-2]) else latest_bb_upper
-        latest_bb_lower = df_with_indicators['bb_lower'].iloc[-1]
-        prev_bb_lower = df_with_indicators['bb_lower'].iloc[-2] if pd.notna(df_with_indicators['bb_lower'].iloc[-2]) else latest_bb_lower
-        latest_atr = df_with_indicators['atr'].iloc[-1] if 'atr' in df_with_indicators.columns and pd.notna(df_with_indicators['atr'].iloc[-1]) else None
+        if 'atr' in df.columns and pd.notna(df['atr'].iloc[-1]):
+            bar_data.atr = df['atr'].iloc[-1]
 
-        if pd.isna(latest_close) or pd.isna(prev_close) or \
-           pd.isna(latest_bb_upper) or pd.isna(prev_bb_upper) or \
-           pd.isna(latest_bb_lower) or pd.isna(prev_bb_lower):
+        latest_close = df['close'].iloc[-1]
+        prev_close = df['close'].iloc[-2]
+        latest_bb_upper = df['bb_upper'].iloc[-1]
+        prev_bb_upper = df['bb_upper'].iloc[-2]
+        latest_bb_lower = df['bb_lower'].iloc[-1]
+        prev_bb_lower = df['bb_lower'].iloc[-2]
+
+        if any(pd.isna(v) for v in [latest_close, prev_close, latest_bb_upper, prev_bb_upper, latest_bb_lower, prev_bb_lower]):
             return SignalType.HOLD
 
-        signal_to_return = SignalType.HOLD
+        long_breakout = latest_close > latest_bb_upper and prev_close <= prev_bb_upper
+        short_breakout = latest_close < latest_bb_lower and prev_close >= prev_bb_lower
 
-        # Volume Filter Check
-        volume_condition_met = True
-        if self.volume_filter_enabled and 'volume' in df_with_indicators.columns and 'volume_sma' in df_with_indicators.columns:
-            current_volume = df_with_indicators['volume'].iloc[-1]
-            volume_sma = df_with_indicators['volume_sma'].iloc[-1]
-            if pd.notna(current_volume) and pd.notna(volume_sma) and volume_sma > 0:
-                if current_volume < volume_sma * self.volume_factor_above_sma:
-                    volume_condition_met = False
-            # else: volume condition remains true if data insufficient
+        if long_breakout:
+            return SignalType.LONG
+        elif short_breakout and self.enable_shorting:
+            return SignalType.SHORT
 
-        # Breakout Candle Size Filter
-        breakout_candle_filter_met = True
-        if self.min_breakout_atr_multiple > 0 and latest_atr is not None and latest_atr > 0:
-            candle_range = abs(df_with_indicators['high'].iloc[-1] - df_with_indicators['low'].iloc[-1])
-            if candle_range < self.min_breakout_atr_multiple * latest_atr:
-                breakout_candle_filter_met = False
-
-        # Long entry: Close breaks above upper band (current close vs current upper, prev close vs prev upper)
-        long_breakout_condition = latest_close > latest_bb_upper and prev_close <= prev_bb_upper
-        
-        # Short entry: Close breaks below lower band
-        short_breakout_condition = latest_close < latest_bb_lower and prev_close >= prev_bb_lower
-
-        if self.current_position_status == SignalType.LONG:
-            # Exit Long: Price closes back inside (e.g., below current upper band)
-            if latest_close < latest_bb_upper: 
-                signal_to_return = SignalType.CLOSE_LONG
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - Bollinger CLOSE_LONG for {self.symbol}. Close: {latest_close:.2f}, BB_Upper: {latest_bb_upper:.2f}")
-        elif self.current_position_status == SignalType.SHORT:
-            # Exit Short: Price closes back inside (e.g., above current lower band)
-            if latest_close > latest_bb_lower:
-                signal_to_return = SignalType.CLOSE_SHORT
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - Bollinger CLOSE_SHORT for {self.symbol}. Close: {latest_close:.2f}, BB_Lower: {latest_bb_lower:.2f}")
-        else: # No current position
-            if long_breakout_condition and volume_condition_met and breakout_candle_filter_met:
-                signal_to_return = SignalType.LONG
-                self.current_position_status = SignalType.LONG
-                logger.info(f"{bar_data.timestamp} - Bollinger LONG for {self.symbol}. Close: {latest_close:.2f}, BB_Upper: {latest_bb_upper:.2f}. Vol Met: {volume_condition_met}, Candle Met: {breakout_candle_filter_met}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-            elif short_breakout_condition and self.enable_shorting and volume_condition_met and breakout_candle_filter_met:
-                signal_to_return = SignalType.SHORT
-                self.current_position_status = SignalType.SHORT
-                logger.info(f"{bar_data.timestamp} - Bollinger SHORT for {self.symbol}. Close: {latest_close:.2f}, BB_Lower: {latest_bb_lower:.2f}. Vol Met: {volume_condition_met}, Candle Met: {breakout_candle_filter_met}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-                
-        return signal_to_return
+        return SignalType.HOLD
 </code>
 
 kamikaze_komodo/strategy_framework/strategies/pair_trading_strategy.py:
@@ -6957,202 +6658,66 @@ from kamikaze_komodo.app_logger import get_logger
 logger = get_logger(__name__)
 
 class EWMACStrategy(BaseStrategy):
+    """
+    Implements a stateless Exponential Weighted Moving Average Crossover (EWMAC) strategy.
+    Generates entry signals only. Exits are handled by the StopManager.
+    """
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(symbol, timeframe, params)
         self.short_window = int(self.params.get('shortwindow', 12))
         self.long_window = int(self.params.get('longwindow', 26))
         self.atr_period = int(self.params.get('atr_period', 14))
         
-        # Phase 7: Regime Filter Parameters
-        self.use_regime_filter = str(self.params.get('useregimefilter', 'false')).lower() == 'true'
-        favorable_regimes_str = self.params.get('favorableregimes', '')
-        self.favorable_regimes = [int(r.strip()) for r in favorable_regimes_str.split(',') if r.strip().isdigit()]
-
-        self.sentiment_filter_long_threshold = self.params.get('sentimentfilter_long_threshold')
-        if isinstance(self.sentiment_filter_long_threshold, str):
-            try:
-                self.sentiment_filter_long_threshold = None if self.sentiment_filter_long_threshold.lower() == 'none' else float(self.sentiment_filter_long_threshold)
-            except ValueError:
-                logger.warning(f"Could not parse sentiment_filter_long_threshold '{self.params.get('sentimentfilter_long_threshold')}' to float. Defaulting to None.")
-                self.sentiment_filter_long_threshold = None
-
-        self.sentiment_filter_short_threshold = self.params.get('sentimentfilter_short_threshold')
-        if isinstance(self.sentiment_filter_short_threshold, str):
-            try:
-                self.sentiment_filter_short_threshold = None if self.sentiment_filter_short_threshold.lower() == 'none' else float(self.sentiment_filter_short_threshold)
-            except ValueError:
-                logger.warning(f"Could not parse sentiment_filter_short_threshold '{self.params.get('sentimentfilter_short_threshold')}' to float. Defaulting to None.")
-                self.sentiment_filter_short_threshold = None
-
-        if not isinstance(self.short_window, int) or not isinstance(self.long_window, int):
-            raise ValueError("EWMACStrategy: 'short_window' and 'long_window' must be integers.")
-        if self.short_window >= self.long_window:
-            raise ValueError("EWMACStrategy: 'short_window' must be less than 'long_window'.")
-
         logger.info(
             f"Initialized EWMACStrategy for {symbol} ({timeframe}) "
-            f"with Short EMA: {self.short_window}, Long EMA: {self.long_window}, ATR Period: {self.atr_period}. "
-            f"Sentiment Long Thresh: {self.sentiment_filter_long_threshold}, Short Thresh: {self.sentiment_filter_short_threshold}. "
-            f"Shorting Enabled: {self.enable_shorting}. "
-            f"Regime Filter Enabled: {self.use_regime_filter}, Favorable Regimes: {self.favorable_regimes}"
+            f"with Short EMA: {self.short_window}, Long EMA: {self.long_window}. "
+            f"Shorting Enabled: {self.enable_shorting}."
         )
 
     def _calculate_indicators(self, data_df: pd.DataFrame) -> pd.DataFrame:
-        if data_df.empty: return data_df
+        if data_df.empty or len(data_df) < self.long_window :
+            return pd.DataFrame()
         df = data_df.copy()
-
-        if 'close' not in df.columns or len(df) < self.long_window :
-            return df
-
         df[f'ema_short'] = ta.ema(df['close'], length=self.short_window)
         df[f'ema_long'] = ta.ema(df['close'], length=self.long_window)
-
         if all(col in df.columns for col in ['high', 'low', 'close']):
             if len(df) >= self.atr_period:
                 df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
-            else:
-                df['atr'] = pd.NA
-        else:
-            df['atr'] = pd.NA
         return df
 
     def generate_signals(self, data: pd.DataFrame, sentiment_series: Optional[pd.Series] = None) -> pd.Series:
-        if data.empty or len(data) < self.long_window:
-            logger.warning(f"Not enough historical data for EWMAC signals. Need {self.long_window}, got {len(data)}.")
-            return pd.Series(index=data.index, dtype='object')
-
-        df_processed = self._calculate_indicators(data)
-
-        if 'ema_short' not in df_processed.columns or 'ema_long' not in df_processed.columns:
-            return pd.Series(index=data.index, dtype='object')
-
-        # Combine sentiment data
-        if sentiment_series is not None and not sentiment_series.empty:
-            df_processed = df_processed.join(sentiment_series.rename('sentiment_score'), how='left')
-            df_processed['sentiment_score'] = df_processed['sentiment_score'].fillna(0.0)
-        elif 'sentiment_score' not in df_processed.columns:
-            df_processed['sentiment_score'] = 0.0
-
-        # Signals based on crossover
-        conditions = [
-            (df_processed['ema_short'] > df_processed['ema_long']) & (df_processed['ema_short'].shift(1) <= df_processed['ema_long'].shift(1)), # Golden Cross
-            (df_processed['ema_short'] < df_processed['ema_long']) & (df_processed['ema_short'].shift(1) >= df_processed['ema_long'].shift(1))  # Death Cross
-        ]
-        choices = [SignalType.LONG, SignalType.SHORT]
-        df_processed['signal'] = np.select(conditions, choices, default=SignalType.HOLD)
-
-        # Apply Filters (Regime and Sentiment)
-        if self.use_regime_filter:
-            if 'market_regime' in df_processed.columns and not df_processed['market_regime'].isnull().all():
-                # Block new entry signals in unfavorable regimes
-                df_processed.loc[~df_processed['market_regime'].isin(self.favorable_regimes), 'signal'] = SignalType.HOLD
-            else:
-                logger.warning("Regime filter is ON for EWMAC, but 'market_regime' column not found in data or is all NaN.")
-
-        if self.sentiment_filter_long_threshold is not None:
-            df_processed.loc[(df_processed['signal'] == SignalType.LONG) & (df_processed['sentiment_score'] < self.sentiment_filter_long_threshold), 'signal'] = SignalType.HOLD
-
-        if self.enable_shorting and self.sentiment_filter_short_threshold is not None:
-            df_processed.loc[(df_processed['signal'] == SignalType.SHORT) & (df_processed['sentiment_score'] > self.sentiment_filter_short_threshold), 'signal'] = SignalType.HOLD
-        elif not self.enable_shorting:
-            df_processed.loc[df_processed['signal'] == SignalType.SHORT, 'signal'] = SignalType.HOLD
-
-
-        # Convert to a final signal series with proper open/close logic
-        final_signals = pd.Series(index=df_processed.index, dtype='object').fillna(SignalType.HOLD)
-        current_pos_state = None
-        for i, row in df_processed.iterrows():
-            if current_pos_state is None:
-                if row['signal'] == SignalType.LONG:
-                    final_signals.loc[i] = SignalType.LONG
-                    current_pos_state = SignalType.LONG
-                elif row['signal'] == SignalType.SHORT:
-                    final_signals.loc[i] = SignalType.SHORT
-                    current_pos_state = SignalType.SHORT
-            elif current_pos_state == SignalType.LONG:
-                if row['signal'] == SignalType.SHORT: # A death cross closes a long
-                    final_signals.loc[i] = SignalType.CLOSE_LONG
-                    current_pos_state = None
-            elif current_pos_state == SignalType.SHORT:
-                 if row['signal'] == SignalType.LONG: # A golden cross closes a short
-                    final_signals.loc[i] = SignalType.CLOSE_SHORT
-                    current_pos_state = None
-        
-        logger.info(f"Generated EWMAC signals (vectorized). Longs: {final_signals.eq(SignalType.LONG).sum()}, Shorts: {final_signals.eq(SignalType.SHORT).sum()}, CloseLongs: {final_signals.eq(SignalType.CLOSE_LONG).sum()}, CloseShorts: {final_signals.eq(SignalType.CLOSE_SHORT).sum()}")
-        return final_signals
+        logger.warning("generate_signals is not the primary method for this strategy; logic is in on_bar_data.")
+        return pd.Series(index=data.index, dtype='object').fillna(SignalType.HOLD)
 
     def on_bar_data(self, bar_data: BarData, sentiment_score: Optional[float] = None, market_regime_data: Optional[Any] = None) -> Union[Optional[SignalType], List[SignalCommand]]:
         self.update_data_history(bar_data)
         if len(self.data_history) < self.long_window + 1:
             return SignalType.HOLD
 
-        # --- Phase 7: Regime Filter Check ---
-        current_regime = bar_data.market_regime
-        is_favorable_regime = True # Default to True (allow trading if filter is off or regime is unknown)
-        if self.use_regime_filter:
-            if current_regime is not None:
-                if current_regime not in self.favorable_regimes:
-                    is_favorable_regime = False
-            else:
-                # If regime is unknown (e.g., NaN), block trade as a safety measure
-                is_favorable_regime = False
-        
-        df_with_indicators = self._calculate_indicators(self.data_history)
-        
-        if 'atr' in df_with_indicators.columns and pd.notna(df_with_indicators['atr'].iloc[-1]):
-                bar_data.atr = df_with_indicators['atr'].iloc[-1]
-    
-        current_sentiment = sentiment_score if sentiment_score is not None else bar_data.sentiment_score
-        if current_sentiment is None or pd.isna(current_sentiment): 
-            current_sentiment = 0.0
-
-        if df_with_indicators.empty or 'ema_short' not in df_with_indicators.columns or \
-            'ema_long' not in df_with_indicators.columns or len(df_with_indicators) < 2:
+        df = self._calculate_indicators(self.data_history)
+        if df.empty or len(df) < 2 or 'ema_short' not in df.columns or 'ema_long' not in df.columns:
             return SignalType.HOLD
 
-        latest_ema_short = df_with_indicators['ema_short'].iloc[-1]
-        prev_ema_short = df_with_indicators['ema_short'].iloc[-2]
-        latest_ema_long = df_with_indicators['ema_long'].iloc[-1]
-        prev_ema_long = df_with_indicators['ema_long'].iloc[-2]
+        if 'atr' in df.columns and pd.notna(df['atr'].iloc[-1]):
+            bar_data.atr = df['atr'].iloc[-1]
 
-        if pd.isna(latest_ema_short) or pd.isna(prev_ema_short) or \
-            pd.isna(latest_ema_long) or pd.isna(prev_ema_long):
+        latest_ema_short = df['ema_short'].iloc[-1]
+        prev_ema_short = df['ema_short'].iloc[-2]
+        latest_ema_long = df['ema_long'].iloc[-1]
+        prev_ema_long = df['ema_long'].iloc[-2]
+
+        if any(pd.isna(v) for v in [latest_ema_short, prev_ema_short, latest_ema_long, prev_ema_long]):
             return SignalType.HOLD
 
-        signal_to_return = SignalType.HOLD
         is_golden_cross = latest_ema_short > latest_ema_long and prev_ema_short <= prev_ema_long
         is_death_cross = latest_ema_short < latest_ema_long and prev_ema_short >= prev_ema_long
 
-        if self.current_position_status == SignalType.LONG:
-            if is_death_cross:
-                signal_to_return = SignalType.CLOSE_LONG
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - EWMAC CLOSE_LONG for {self.symbol}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}")
-        elif self.current_position_status == SignalType.SHORT:
-            if is_golden_cross:
-                signal_to_return = SignalType.CLOSE_SHORT
-                self.current_position_status = None
-                logger.info(f"{bar_data.timestamp} - EWMAC CLOSE_SHORT for {self.symbol}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}")
-        else: # No current position
-            if is_golden_cross:
-                sentiment_ok = self.sentiment_filter_long_threshold is None or current_sentiment >= self.sentiment_filter_long_threshold
-                if sentiment_ok and is_favorable_regime:
-                    signal_to_return = SignalType.LONG
-                    self.current_position_status = SignalType.LONG
-                    logger.info(f"{bar_data.timestamp} - EWMAC LONG for {self.symbol}. Sent: {current_sentiment:.2f}. Regime: {current_regime}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-                else:
-                    logger.info(f"{bar_data.timestamp} - EWMAC LONG for {self.symbol} SUPPRESSED. Sentiment OK: {sentiment_ok}, Regime OK: {is_favorable_regime} (is {current_regime})")
-
-            elif is_death_cross and self.enable_shorting:
-                sentiment_ok = self.sentiment_filter_short_threshold is None or current_sentiment <= self.sentiment_filter_short_threshold
-                if sentiment_ok and is_favorable_regime:
-                    signal_to_return = SignalType.SHORT
-                    self.current_position_status = SignalType.SHORT
-                    logger.info(f"{bar_data.timestamp} - EWMAC SHORT for {self.symbol}. Sent: {current_sentiment:.2f}. Regime: {current_regime}. EMA_S: {latest_ema_short:.2f}, EMA_L: {latest_ema_long:.2f}. ATR: {bar_data.atr if bar_data.atr else 'N/A'}")
-                else:
-                    logger.info(f"{bar_data.timestamp} - EWMAC SHORT for {self.symbol} SUPPRESSED. Sentiment OK: {sentiment_ok}, Regime OK: {is_favorable_regime} (is {current_regime})")
-    
-        return signal_to_return
+        if is_golden_cross:
+            return SignalType.LONG
+        elif is_death_cross and self.enable_shorting:
+            return SignalType.SHORT
+            
+        return SignalType.HOLD
 </code>
 
 kamikaze_komodo/ai_news_analysis_agent_module/news_scraper.py:
