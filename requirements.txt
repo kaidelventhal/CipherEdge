@@ -37,3 +37,5 @@ scipy
 # Optional AI Agent Modules (add if you use these features)
 # browser-use
 # jeepney
+aicodeprep
+lxml_html_clean

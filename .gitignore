@@ -7,11 +7,11 @@ __pycache__/
 # If your venv is directly inside kamikaze_komodo package:
 kamikaze_komodo/.venv/
 # If you might create other venvs at the root:
-# .venv/
-# venv/
-# ENV/
-# env/
-# .env
+.venv/
+venv/
+ENV/
+env/
+.env
 
 # Database files
 kamikaze_komodo_data.db
