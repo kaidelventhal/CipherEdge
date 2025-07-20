@@ -248,30 +248,3 @@ class ExchangeAPI:
                 logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
         except Exception as e:
             logger.error(f"Error closing CCXT exchange connection for {self.exchange_id}: {e}", exc_info=True)
-
-# Example Usage (run within an asyncio event loop):
-async def main_exchange_api_example():
-    if not settings:
-        print("Settings could not be loaded. Exiting example.")
-        return
-
-    exchange_api = ExchangeAPI() # Uses exchange_id from settings
-    balance = await exchange_api.fetch_balance()
-    if balance:
-        logger.info(f"Free USD Balance: {balance.get('USD', {}).get('free', 'N/A')}")
-        logger.info(f"Free {settings.default_symbol.split('/')[0]} Balance: {balance.get(settings.default_symbol.split('/')[0], {}).get('free', 'N/A')}")
-
-    # target_symbol = settings.default_symbol
-    # order_to_place = await exchange_api.create_order(
-    #     symbol=target_symbol,
-    #     order_type=OrderType.LIMIT,
-    #     side=OrderSide.BUY,
-    #     amount=0.0001,
-    #     price=15000.0
-    # )
-    # if order_to_place:
-    #     logger.info(f"Practice order placed/simulated: ID {order_to_place.id}, Status {order_to_place.status}")
-    # else:
-    #     logger.warning("Practice order placement failed or was not attempted.")
-
-    await exchange_api.close()

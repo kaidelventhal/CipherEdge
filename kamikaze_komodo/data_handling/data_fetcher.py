@@ -1,7 +1,7 @@
 # kamikaze_komodo/data_handling/data_fetcher.py
 import ccxt.async_support as ccxt # Use async version for future compatibility
 import asyncio
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from datetime import datetime, timedelta, timezone
 # Assuming these are correctly located relative to this file for your project structure
 from kamikaze_komodo.core.models import BarData
@@ -62,7 +62,7 @@ class DataFetcher:
             else:
                 logger.warning(f"{self.exchange_id} CCXT class does not have a 'set_sandbox_mode' method. Testnet operation relies on correct API keys for the test environment and default URLs.")
         
-        self.exchange.verbose = True # Essential for debugging API calls
+        self.exchange.verbose = False # Set to True for debugging API calls
         logger.info(f"Initialized DataFetcher for '{self.exchange_id}'. Configured Testnet (Sandbox) from settings: {settings.kraken_testnet}")
 
     async def fetch_historical_ohlcv(
@@ -216,6 +216,34 @@ class DataFetcher:
         logger.info(f"Fetched {len(data_symbol1)} bars for {symbol1} and {len(data_symbol2)} bars for {symbol2} for pair trading.")
         return data_symbol1, data_symbol2
 
+    async def fetch_funding_rate_history(
+        self,
+        symbol: str,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Fetches historical funding rate data for a perpetual futures symbol.
+        """
+        if not self.exchange.has.get('fetchFundingRateHistory'):
+            logger.error(f"{self.exchange_id} does not support fetchFundingRateHistory.")
+            return []
+
+        since_timestamp_ms = int(since.timestamp() * 1000) if since else None
+        funding_rates = []
+        try:
+            logger.info(f"Fetching funding rate history for {symbol} from {self.exchange_id} since {since}.")
+            funding_rates = await self.exchange.fetch_funding_rate_history(symbol, since_timestamp_ms, limit)
+            logger.info(f"Successfully fetched {len(funding_rates)} funding rate entries for {symbol}.")
+        except ccxt.NetworkError as e:
+            logger.error(f"Network error fetching funding rates for {symbol}: {e}", exc_info=True)
+        except ccxt.ExchangeError as e:
+            logger.error(f"Exchange error fetching funding rates for {symbol}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred fetching funding rates for {symbol}: {e}", exc_info=True)
+        return funding_rates
+
+
     async def subscribe_to_realtime_trades(self, symbol: str):
         # (Your existing placeholder code for this method)
         if not self.exchange.has['watchTrades']:
@@ -235,23 +263,3 @@ class DataFetcher:
             logger.info(f"CCXT exchange connection for {self.exchange_id} closed.")
         except Exception as e:
             logger.error(f"Error closing CCXT exchange connection for {self.exchange_id}: {e}", exc_info=True)
-
-
-if __name__ == '__main__':
-    # This is just for isolated testing of data_fetcher.
-    # In the main application, this would be integrated differently.
-    # Ensure settings are loaded before running this.
-    # For example, by running from the root kamikaze_komodo directory or adjusting paths.
-    # `python -m kamikaze_komodo.data_handling.data_fetcher`
-    
-    # Need to load settings explicitly if running standalone for testing
-    # from kamikaze_komodo.config.settings import Config
-    # settings_instance = Config(config_file='../config/config.ini', secrets_file='../config/secrets.ini')
-    # global settings # make it available globally in this module for the example
-    # settings = settings_instance
-
-    # if settings:
-    #     asyncio.run(main_data_fetcher_example())
-    # else:
-    #     print("Failed to load settings for standalone data_fetcher example.")
-    pass

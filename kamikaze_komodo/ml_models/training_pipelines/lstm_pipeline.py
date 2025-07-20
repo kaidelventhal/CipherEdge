@@ -3,8 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import os
 from kamikaze_komodo.ml_models.price_forecasting.lstm_model import LSTMForecaster
-from kamikaze_komodo.data_handling.data_fetcher import DataFetcher
-from kamikaze_komodo.data_handling.database_manager import DatabaseManager
+from kamikaze_komodo.data_handling.data_handler import DataHandler
 from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
 
@@ -37,65 +36,25 @@ class LSTMTrainingPipeline:
         logger.info(f"LSTM Training Pipeline initialized. Model will be saved to: {self.model_full_save_path}")
 
     async def fetch_training_data(self, days_history: int) -> pd.DataFrame:
-        db_manager = DatabaseManager()
-        data_fetcher = DataFetcher()
-        
+        data_handler = DataHandler()
         start_date = datetime.now(timezone.utc) - timedelta(days=days_history)
         end_date = datetime.now(timezone.utc)
-        historical_bars = db_manager.retrieve_bar_data(self.symbol, self.timeframe, start_date, end_date)
+        data_df = await data_handler.get_prepared_data(
+            self.symbol, self.timeframe, start_date, end_date,
+            needs_funding_rate=True, needs_sentiment=True
+        )
+        await data_handler.close()
         
-        required_bars = int(self.model_params.get('minbarsfortraining', 200))
-        if not historical_bars or len(historical_bars) < required_bars:
-            logger.info("Insufficient data in DB. Fetching fresh data for LSTM training...")
-            historical_bars = await data_fetcher.fetch_historical_data_for_period(self.symbol, self.timeframe, start_date, end_date)
-            if historical_bars:
-                db_manager.store_bar_data(historical_bars)
-            else:
-                logger.error("Failed to fetch training data for LSTM.")
-                await data_fetcher.close()
-                db_manager.close()
-                return pd.DataFrame()
-        
-        await data_fetcher.close()
-        db_manager.close()
-
-        if not historical_bars:
-            return pd.DataFrame()
-            
-        data_df = pd.DataFrame([bar.model_dump() for bar in historical_bars])
-        data_df['timestamp'] = pd.to_datetime(data_df['timestamp'])
-        data_df.set_index('timestamp', inplace=True)
-        data_df.sort_index(inplace=True)
-        
-        if settings.enable_sentiment_analysis and settings.simulated_sentiment_data_path:
-            sentiment_path = settings.simulated_sentiment_data_path
-            if os.path.exists(sentiment_path):
-                logger.info(f"Loading sentiment data from {sentiment_path} to merge for training.")
-                sentiment_df = pd.read_csv(sentiment_path, parse_dates=['timestamp'], index_col='timestamp')
-                if not sentiment_df.index.tz:
-                    sentiment_df.index = sentiment_df.index.tz_localize('UTC')
-                else:
-                    sentiment_df.index = sentiment_df.index.tz_convert('UTC')
-                
-                # --- FIX: Drop existing sentiment_score column to prevent overlap error ---
-                if 'sentiment_score' in data_df.columns:
-                    data_df = data_df.drop(columns=['sentiment_score'])
-
-                data_df = data_df.join(sentiment_df['sentiment_score'], how='left')
-                data_df['sentiment_score'].ffill(inplace=True)
-                data_df['sentiment_score'].fillna(0.0, inplace=True)
-                logger.info("Successfully merged sentiment data into the training set.")
-            else:
-                logger.warning(f"Sentiment data file not found at {sentiment_path}. Training without sentiment feature.")
-                data_df['sentiment_score'] = 0.0
-        else:
-            logger.info("Sentiment analysis not enabled or no data path provided. Training without sentiment feature.")
-            data_df['sentiment_score'] = 0.0
-
-        logger.info(f"Fetched and prepared {len(data_df)} bars for LSTM training.")
+        if not data_df.empty:
+            logger.info(f"Fetched and prepared {len(data_df)} bars for LSTM training.")
         return data_df
 
-    async def run_training(self):
+    async def run_training(self, tune_hyperparameters: bool = False):
+        # Note: Hyperparameter tuning for LSTMs is more complex and computationally
+        # expensive than for tree-based models. This is a simplified placeholder.
+        if tune_hyperparameters:
+            logger.warning("Hyperparameter tuning for LSTM is not fully implemented in this phase. Running with default parameters.")
+
         days_history = int(self.model_params.get('trainingdayshistory', 730))
         historical_df = await self.fetch_training_data(days_history=days_history)
 

@@ -1,11 +1,10 @@
-# kamikaze_komodo/backtesting_engine/performance_analyzer.py
-# Phase 6: Added Calmar, Sortino, Avg Holding Period, Win/Loss Streaks.
-# Configurable risk-free rate and annualization factor.
-
+# FILE: kamikaze_komodo/backtesting_engine/performance_analyzer.py
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
+from scipy.stats import norm
+
 from kamikaze_komodo.core.models import Trade
 from kamikaze_komodo.core.enums import OrderSide, TradeResult
 from kamikaze_komodo.app_logger import get_logger
@@ -18,7 +17,7 @@ class PerformanceAnalyzer:
         trades: List[Trade],
         initial_capital: float,
         final_capital: float,
-        equity_curve_df: Optional[pd.DataFrame] = None, # Timestamp-indexed 'total_value'
+        equity_curve_df: Optional[pd.DataFrame] = None, # Timestamp-indexed 'total_value_usd'
         risk_free_rate_annual: float = 0.02, # Annual risk-free rate (e.g., 2%)
         annualization_factor: int = 252 # Trading days in a year for Sharpe/Sortino
     ):
@@ -40,11 +39,12 @@ class PerformanceAnalyzer:
 
 
     def _calculate_periodic_returns(self) -> Optional[pd.Series]:
-        if self.equity_curve_df is None or self.equity_curve_df.empty or 'total_value' not in self.equity_curve_df.columns:
+        # FIX: Use 'total_value_usd' to match the backtesting engine's output
+        if self.equity_curve_df is None or self.equity_curve_df.empty or 'total_value_usd' not in self.equity_curve_df.columns:
             logger.warning("Equity curve data is missing or invalid. Cannot calculate periodic returns for Sharpe/Sortino.")
             return None
         # Resample to daily returns for annualization, handling potential non-unique index if multiple records per day
-        daily_equity = self.equity_curve_df['total_value'].resample('D').last().ffill()
+        daily_equity = self.equity_curve_df['total_value_usd'].resample('D').last().ffill()
         periodic_returns = daily_equity.pct_change().dropna()
         return periodic_returns
 
@@ -72,6 +72,8 @@ class PerformanceAnalyzer:
             "average_holding_period_hours": 0.0,
             "longest_win_streak": 0,
             "longest_loss_streak": 0,
+            "time_in_market_pct": 0.0,
+            "turnover_rate": np.nan,
         }
 
         if self.trades_df.empty:
@@ -115,8 +117,9 @@ class PerformanceAnalyzer:
         metrics["total_fees_paid"] = self.trades_df['commission'].sum()
 
         # Max Drawdown (from equity curve)
-        if self.equity_curve_df is not None and not self.equity_curve_df.empty and 'total_value' in self.equity_curve_df.columns:
-            equity_values = self.equity_curve_df['total_value']
+        # FIX: Use 'total_value_usd'
+        if self.equity_curve_df is not None and not self.equity_curve_df.empty and 'total_value_usd' in self.equity_curve_df.columns:
+            equity_values = self.equity_curve_df['total_value_usd']
             if len(equity_values) > 1:
                 peak = equity_values.expanding(min_periods=1).max()
                 drawdown = (equity_values - peak) / peak
@@ -143,11 +146,10 @@ class PerformanceAnalyzer:
     
         # Calmar Ratio
         if metrics["max_drawdown_pct"] is not None and metrics["max_drawdown_pct"] > 0:
-            # Annualized total return
             if self.equity_curve_df is not None and not self.equity_curve_df.empty:
                 start_date = self.equity_curve_df.index.min()
                 end_date = self.equity_curve_df.index.max()
-                duration_years = (end_date - start_date).days / 365.25 if (end_date - start_date).days > 0 else 1.0/365.25 # Avoid zero division
+                duration_years = (end_date - start_date).days / 365.25 if (end_date - start_date).days > 0 else 1.0/365.25
                 total_return = (self.final_capital / self.initial_capital) - 1 if self.initial_capital > 0 else 0
                 annualized_return = ((1 + total_return) ** (1 / duration_years)) - 1 if duration_years > 0 else total_return
                 metrics["calmar_ratio"] = (annualized_return * 100) / metrics["max_drawdown_pct"]
@@ -177,6 +179,28 @@ class PerformanceAnalyzer:
                 loss_streak = max(loss_streak, current_loss_streak)
             metrics["longest_win_streak"] = win_streak
             metrics["longest_loss_streak"] = loss_streak
+        
+        # Time in Market
+        if self.equity_curve_df is not None and not self.equity_curve_df.empty:
+            total_duration = self.equity_curve_df.index.max() - self.equity_curve_df.index.min()
+            if total_duration.total_seconds() > 0:
+                time_in_trades = timedelta(0)
+                for _, trade in self.trades_df.iterrows():
+                    if pd.notna(trade['exit_timestamp']):
+                        time_in_trades += trade['exit_timestamp'] - trade['entry_timestamp']
+                metrics["time_in_market_pct"] = (time_in_trades / total_duration) * 100
+
+        # Turnover Rate
+        # FIX: Use 'total_value_usd'
+        if self.equity_curve_df is not None and not self.equity_curve_df.empty and len(self.equity_curve_df) > 1:
+            total_traded_value = self.trades_df.apply(lambda x: abs(x['amount'] * x['entry_price']), axis=1).sum()
+            total_traded_value += self.trades_df.apply(lambda x: abs(x['amount'] * x['exit_price']) if pd.notna(x['exit_price']) else 0, axis=1).sum()
+
+            time_diffs = self.equity_curve_df.index.to_series().diff().dt.total_seconds().fillna(0)
+            time_weighted_avg_equity = np.average(self.equity_curve_df['total_value_usd'], weights=time_diffs)
+            
+            if time_weighted_avg_equity > 0:
+                metrics["turnover_rate"] = total_traded_value / time_weighted_avg_equity
 
         return metrics
 
@@ -186,33 +210,85 @@ class PerformanceAnalyzer:
 
         summary = f"""
         --------------------------------------------------
-        |         Backtest Performance Summary         |
+        |          Backtest Performance Summary          |
         --------------------------------------------------
-        | Metric                        | Value          |
+        | Metric                       | Value               |
         --------------------------------------------------
-        | Initial Capital               | ${metrics.get("initial_capital", 0):<15,.2f} |
-        | Final Capital                 | ${metrics.get("final_capital", 0):<15,.2f} |
-        | Total Net Profit              | ${metrics.get("total_net_profit", 0):<15,.2f} |
-        | Total Return                  | {metrics.get("total_return_pct", 0):<15.2f}% |
-        | Total Trades                  | {metrics.get("total_trades", 0):<16} |
-        | Winning Trades                | {metrics.get("winning_trades", 0):<16} |
-        | Losing Trades                 | {metrics.get("losing_trades", 0):<16} |
-        | Breakeven Trades              | {metrics.get("breakeven_trades", 0):<16} |
-        | Win Rate                      | {metrics.get("win_rate_pct", 0):<15.2f}% |
-        | Loss Rate                     | {metrics.get("loss_rate_pct", 0):<15.2f}% |
-        | Average PnL per Trade         | ${metrics.get("average_pnl_per_trade", 0):<15,.2f} |
-        | Average Win PnL               | ${metrics.get("average_win_pnl", 0):<15,.2f} |
-        | Average Loss PnL              | ${metrics.get("average_loss_pnl", 0):<15,.2f} |
-        | Profit Factor                 | {metrics.get("profit_factor", float('nan')):<16.2f} |
-        | Max Drawdown                  | {metrics.get("max_drawdown_pct", 0):<15.2f}% |
-        | Sharpe Ratio                  | {metrics.get("sharpe_ratio", float('nan')):<16.2f} |
-        | Sortino Ratio                 | {metrics.get("sortino_ratio", float('nan')):<16.2f} |
-        | Calmar Ratio                  | {metrics.get("calmar_ratio", float('nan')):<16.2f} |
-        | Avg Holding Period (hours)    | {metrics.get("average_holding_period_hours", 0):<16.2f} |
-        | Longest Win Streak            | {metrics.get("longest_win_streak", 0):<16} |
-        | Longest Loss Streak           | {metrics.get("longest_loss_streak", 0):<16} |
-        | Total Fees Paid               | ${metrics.get("total_fees_paid", 0):<15,.2f} |
+        | Initial Capital              | ${metrics.get("initial_capital", 0):<15,.2f} |
+        | Final Capital                | ${metrics.get("final_capital", 0):<15,.2f} |
+        | Total Net Profit             | ${metrics.get("total_net_profit", 0):<15,.2f} |
+        | Total Return                 | {metrics.get("total_return_pct", 0):<15.2f}% |
+        | Total Trades                 | {metrics.get("total_trades", 0):<16} |
+        | Winning Trades               | {metrics.get("winning_trades", 0):<16} |
+        | Losing Trades                | {metrics.get("losing_trades", 0):<16} |
+        | Breakeven Trades             | {metrics.get("breakeven_trades", 0):<16} |
+        | Win Rate                     | {metrics.get("win_rate_pct", 0):<15.2f}% |
+        | Loss Rate                    | {metrics.get("loss_rate_pct", 0):<15.2f}% |
+        | Average PnL per Trade        | ${metrics.get("average_pnl_per_trade", 0):<15,.2f} |
+        | Average Win PnL              | ${metrics.get("average_win_pnl", 0):<15,.2f} |
+        | Average Loss PnL             | ${metrics.get("average_loss_pnl", 0):<15,.2f} |
+        | Profit Factor                | {metrics.get("profit_factor", float('nan')):<16.2f} |
+        | Max Drawdown                 | {metrics.get("max_drawdown_pct", 0):<15.2f}% |
+        | Sharpe Ratio                 | {metrics.get("sharpe_ratio", float('nan')):<16.2f} |
+        | Sortino Ratio                | {metrics.get("sortino_ratio", float('nan')):<16.2f} |
+        | Calmar Ratio                 | {metrics.get("calmar_ratio", float('nan')):<16.2f} |
+        | Avg Holding Period (hours)   | {metrics.get("average_holding_period_hours", 0):<16.2f} |
+        | Longest Win Streak           | {metrics.get("longest_win_streak", 0):<16} |
+        | Longest Loss Streak          | {metrics.get("longest_loss_streak", 0):<16} |
+        | Time in Market               | {metrics.get("time_in_market_pct", 0):<15.2f}% |
+        | Turnover Rate                | {metrics.get("turnover_rate", float('nan')):<16.2f} |
+        | Total Fees Paid              | ${metrics.get("total_fees_paid", 0):<15,.2f} |
         --------------------------------------------------
         """
         print(summary)
         logger.info("Performance summary generated." + summary.replace("\n      |", "\n"))
+
+
+    @staticmethod
+    def calculate_deflated_sharpe_ratio(
+        sharpe_ratios_series: pd.Series,
+        num_bars_in_backtest: int,
+        selected_sharpe: float
+    ) -> Optional[float]:
+        """
+        Calculates the Deflated Sharpe Ratio (DSR) based on a series of Sharpe Ratios from multiple trials.
+        This indicates the probability that the selected Sharpe Ratio is a false positive.
+        Based on "The Deflated Sharpe Ratio" by Lopez de Prado.
+
+        Args:
+            sharpe_ratios_series (pd.Series): A series of Sharpe Ratios from an optimization run (e.g., grid search).
+            num_bars_in_backtest (int): The number of observations (e.g., days, bars) in the backtest period.
+            selected_sharpe (float): The Sharpe Ratio of the strategy selected from the trials.
+
+        Returns:
+            Optional[float]: The Deflated Sharpe Ratio, or None if calculation fails.
+        """
+        if sharpe_ratios_series.empty or num_bars_in_backtest < 30:
+            logger.warning("DSR calculation requires a series of Sharpe Ratios and a sufficient number of backtest bars.")
+            return None
+
+        n_trials = len(sharpe_ratios_series)
+        var_sr = sharpe_ratios_series.var()
+
+        if pd.isna(var_sr) or var_sr == 0:
+            logger.warning("Variance of Sharpe Ratios is zero or NaN. Cannot calculate DSR.")
+            return None
+        
+        # Expected maximum Sharpe Ratio approximation
+        euler_mascheroni = 0.5772156649
+        e_max_sr = ( (1 - euler_mascheroni) * norm.ppf(1 - 1/n_trials) ) + \
+                   ( euler_mascheroni * norm.ppf(1 - 1/(n_trials * np.e)) )
+        
+        # Deflated Sharpe Ratio Calculation
+        # DSR = P[SR_real <= SR_selected | N trials] = CDF of Z score
+        try:
+            # The Z-score compares the selected SR to the expected maximum SR from random trials
+            z_score = (selected_sharpe - (e_max_sr * np.sqrt(var_sr))) * \
+                      np.sqrt(num_bars_in_backtest - 1)
+            
+            deflated_sharpe = norm.cdf(z_score)
+            logger.info(f"DSR Calculation: N_trials={n_trials}, Var(SR)={var_sr:.4f}, E[MaxSR]={e_max_sr:.4f}, SelectedSR={selected_sharpe:.4f}, Z-Score={z_score:.4f}")
+            return deflated_sharpe
+        except Exception as e:
+            logger.error(f"Error calculating Deflated Sharpe Ratio: {e}", exc_info=True)
+            return None

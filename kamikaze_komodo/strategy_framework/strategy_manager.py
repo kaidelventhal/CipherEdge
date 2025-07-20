@@ -66,33 +66,3 @@ class StrategyManager:
         return signals_from_strategies
     def get_all_strategies(self) -> List[BaseStrategy]:
         return self.strategies
-# Example Usage (Conceptual)
-if __name__ == '__main__':
-    from kamikaze_komodo.strategy_framework.strategies.ewmac import EWMACStrategy
-    from kamikaze_komodo.config.settings import settings # Assuming settings are loaded
-    if settings:
-        manager = StrategyManager()
-        
-        # Create and add a strategy instance
-        ewmac_params = {
-            'short_window': settings.ewmac_short_window,
-            'long_window': settings.ewmac_long_window
-        }
-        ewmac_btc_1h = EWMACStrategy(symbol="BTC/USD", timeframe="1h", params=ewmac_params)
-        manager.add_strategy(ewmac_btc_1h)
-        # Simulate receiving bar data
-        # In a real system, this BarData would come from DataFetcher
-        from datetime import datetime, timezone
-        example_bar = BarData(
-            timestamp=datetime.now(timezone.utc),
-            open=40000, high=40500, low=39800, close=40200, volume=100,
-            symbol="BTC/USD", timeframe="1h"
-        )
-        # To actually get a signal, the strategy needs historical data first.
-        # This is a simplified call. `ewmac_btc_1h.update_data_history(bar)` would need to be called many times first.
-        # For a single bar without history, it will likely return HOLD or an error if not enough data.
-        # signals = manager.on_bar_data_all(example_bar)
-        # logger.info(f"Signals received: {signals}")
-        logger.info("StrategyManager example completed. For meaningful signals, strategies need historical data.")
-    else:
-        logger.error("Settings not loaded, cannot run StrategyManager example.")

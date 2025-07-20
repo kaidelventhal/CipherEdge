@@ -12,7 +12,7 @@ class BasePriceForecaster(ABC):
         self.model_path = model_path
         self.params = params if params is not None else {}
         self.model: Any = None
-        # FIX: The call to load_model is removed from the base class.
+        # The call to load_model is removed from the base class.
         # Subclasses are now responsible for calling it at the appropriate time
         # (i.e., after the model architecture has been defined).
         logger.info(f"{self.__class__.__name__} initialized with model_path: {model_path}, params: {self.params}")
@@ -27,7 +27,7 @@ class BasePriceForecaster(ABC):
         """
         pass
     @abstractmethod
-    def predict(self, new_data: pd.DataFrame, feature_columns: Optional[list] = None) -> Union[pd.Series, float, None]:
+    def predict(self, new_data: pd.DataFrame, feature_columns: Optional[list] = None) -> Union[pd.Series, float, None, Dict[str, Any]]:
         """
         Makes predictions on new data.
         Args:
@@ -35,8 +35,9 @@ class BasePriceForecaster(ABC):
                                      For bar-by-bar, this might be a single row or a lookback window.
             feature_columns (Optional[list]): List of column names to be used as features, must match training.
         Returns:
-            Union[pd.Series, float, None]: Predicted value(s) or None if prediction fails.
-                                           Could be a series for multi-step or single float for next step.
+            Union[pd.Series, float, None, Dict]: Predicted value(s) or None if prediction fails.
+                                                 Could be a series for multi-step, single float for next step,
+                                                 or a Dict for classifiers.
         """
         pass
     @abstractmethod
@@ -52,7 +53,7 @@ class BasePriceForecaster(ABC):
         """
         pass
     @abstractmethod
-    def create_features(self, data: pd.DataFrame, feature_columns: Optional[list] = None) -> pd.DataFrame:
+    def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Creates features for the model from raw data.
         """

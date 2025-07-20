@@ -8,6 +8,10 @@ from typing import Optional, Dict, Any, List, Union, Tuple
 from sklearn.preprocessing import MinMaxScaler
 
 from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
+from kamikaze_komodo.ml_models.feature_engineering import (
+    add_lag_features, add_rolling_window_features, add_technical_indicators,
+    add_sentiment_features, add_cyclical_time_features
+)
 from kamikaze_komodo.app_logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,8 +39,10 @@ class LSTMForecaster(BasePriceForecaster):
         super().__init__(model_path, params)
         self.scaler = MinMaxScaler(feature_range=(-1, 1))
         self.sequence_length = int(self.params.get('sequencelength', 60))
-        self.num_features = int(self.params.get('numfeatures', 5))
-        self.feature_columns = self.params.get('featurecolumns', 'close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14').split(',')
+        
+        feature_columns_str = self.params.get('featurecolumns', 'close,log_return_lag_1,close_change_lag_1,volatility_5,RSI_14,sentiment_score')
+        self.feature_columns = [col.strip() for col in feature_columns_str.split(',')]
+        self.num_features = len(self.feature_columns)
 
         # Model hyperparameters
         self.hidden_size = int(self.params.get('hiddensize', 50))
@@ -46,7 +52,7 @@ class LSTMForecaster(BasePriceForecaster):
         self.batch_size = int(self.params.get('batchsize', 32))
         self.learning_rate = float(self.params.get('learningrate', 0.001))
         
-        # Initialize model architecture but don't load weights from super() as it's not implemented there for torch
+        # Initialize model architecture
         self.model = LSTMNetwork(
             input_size=self.num_features,
             hidden_size=self.hidden_size,
@@ -58,22 +64,20 @@ class LSTMForecaster(BasePriceForecaster):
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        if data.empty:
-            return pd.DataFrame()
+        """Creates features using centralized feature engineering functions."""
+        if data.empty: return pd.DataFrame()
         df = data.copy()
-        
-        import pandas_ta as ta
-        for lag in [1, 3, 5]:
-            df[f'log_return_lag_{lag}'] = np.log(df['close'] / df['close'].shift(lag))
-            df[f'close_change_lag_{lag}'] = df['close'].pct_change(lag)
-        df['volatility_5'] = df['log_return_lag_1'].rolling(window=5).std()
-        df.ta.rsi(length=14, append=True, col_names=('RSI_14',))
-        
+        df = add_lag_features(df)
+        df = add_rolling_window_features(df)
+        df = add_technical_indicators(df)
+        df = add_sentiment_features(df)
+        df = add_cyclical_time_features(df)
         df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
     def _create_sequences(self, data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         X, y = [], []
+        # data has features + target column at the end
         for i in range(len(data) - self.sequence_length):
             X.append(data[i:(i + self.sequence_length), :-1])
             y.append(data[i + self.sequence_length, -1])
@@ -86,32 +90,21 @@ class LSTMForecaster(BasePriceForecaster):
         if feature_columns is None:
             feature_columns = self.feature_columns
             
-        df_features['target'] = df_features['close'].pct_change(1).shift(-1)
+        df_features['target'] = (df_features['close'].shift(-1) / df_features['close']) - 1
         
-        # --- FIX: Select final columns BEFORE dropping NaN values ---
-        # 1. Define the list of columns to be used in the model
         final_columns_to_use = feature_columns + ['target']
-        
-        # 2. Select only this subset of data
-        features_with_target = df_features[final_columns_to_use]
-        
-        # 3. NOW, drop rows where any of these specific columns have NaN
-        features_with_target = features_with_target.dropna()
+        features_with_target = df_features[final_columns_to_use].dropna()
 
-        # 4. Add a guard clause in case the DataFrame is empty after dropping NaNs
-        if features_with_target.empty:
-            logger.error("DataFrame is empty after selecting features and dropping NaNs. Not enough data to create complete feature/target rows. Cannot train LSTM model.")
+        if features_with_target.empty or len(features_with_target) < self.sequence_length + 1:
+            logger.error("Not enough data to create sequences for LSTM training.")
             return
-        # --- END FIX ---
         
-        # Scale data
         scaled_data = self.scaler.fit_transform(features_with_target)
         
         X, y = self._create_sequences(scaled_data)
         X_train = torch.from_numpy(X).float()
         y_train = torch.from_numpy(y).float().view(-1, 1)
         
-        # Training Loop
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
@@ -139,24 +132,21 @@ class LSTMForecaster(BasePriceForecaster):
         if feature_columns is None:
             feature_columns = self.trained_feature_columns_ or self.feature_columns
             
-        # We need `sequence_length` of feature data to make one prediction
         if len(df_features) < self.sequence_length:
             return None
             
         last_sequence_unscaled = df_features[feature_columns].iloc[-self.sequence_length:]
         if last_sequence_unscaled.isnull().values.any():
-            return None # Cannot predict with NaNs
+            return None
         
-        # Note: Scaler was fit on features + target. We only scale features here for prediction.
-        # This is a simplification; a more robust approach uses separate scalers.
-        # For now, we reuse the fitted scaler on the feature subset.
+        # We only need to transform the features for prediction
         scaled_sequence = self.scaler.transform(pd.concat([last_sequence_unscaled, pd.DataFrame(columns=['target'])], axis=1))[:, :-1]
         
         with torch.no_grad():
-            input_tensor = torch.from_numpy(scaled_sequence).float().unsqueeze(0) # Add batch dimension
+            input_tensor = torch.from_numpy(scaled_sequence).float().unsqueeze(0)
             prediction_scaled = self.model(input_tensor)
         
-        # We need to inverse transform the prediction. This requires a dummy array.
+        # Inverse transform the prediction
         dummy_array = np.zeros((1, len(feature_columns) + 1))
         dummy_array[0, -1] = prediction_scaled.item()
         prediction_unscaled = self.scaler.inverse_transform(dummy_array)[0, -1]
@@ -178,8 +168,6 @@ class LSTMForecaster(BasePriceForecaster):
 
     def load_model(self, path: str):
         try:
-            # FIX: Set weights_only=False to allow loading sklearn scaler object
-            # This is safe as we are loading a file we just saved in a trusted environment.
             state = torch.load(path, weights_only=False)
             self.model.load_state_dict(state['model_state_dict'])
             self.scaler = state['scaler']
