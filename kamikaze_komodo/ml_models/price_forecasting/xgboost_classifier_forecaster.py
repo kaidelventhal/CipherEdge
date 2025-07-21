@@ -26,15 +26,9 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         super().__init__(model_path, params)
         
         self.default_xgb_params = {
-            'objective': 'multi:softprob',
-            'eval_metric': 'mlogloss',
-            'n_estimators': 100,
-            'learning_rate': 0.1,
-            'max_depth': 3,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'use_label_encoder': False,
-            'seed': 42,
+            'objective': 'multi:softprob', 'eval_metric': 'mlogloss', 'n_estimators': 100,
+            'learning_rate': 0.1, 'max_depth': 3, 'subsample': 0.8,
+            'colsample_bytree': 0.8, 'use_label_encoder': False, 'seed': 42,
         }
         config_xgb_params = {k.replace('xgb_params_', ''): v for k, v in self.params.items() if k.startswith('xgb_params_')}
         self.xgb_params = {**self.default_xgb_params, **config_xgb_params}
@@ -46,7 +40,6 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Creates features using centralized feature engineering functions."""
         if data.empty: return pd.DataFrame()
         df = data.copy()
         df = add_lag_features(df)
@@ -85,18 +78,20 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             logger.error(f"Unsupported target_definition: {target_definition}")
             return
 
-        df.dropna(subset=['target'], inplace=True)
         df_with_features = self.create_features(df)
 
         actual_features = feature_columns or [col for col in df_with_features.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'symbol', 'timeframe', 'target']]
         
-        X = df_with_features[actual_features].copy()
-        X.dropna(inplace=True)
-        y = df_with_features.loc[X.index, 'target'].astype(int)
+        # FIX: Combine features and target into a new DF, then drop NaNs
+        training_df = df_with_features[actual_features + ['target']].copy()
+        training_df.dropna(inplace=True)
 
-        if X.empty or y.empty:
+        if training_df.empty:
             logger.error("Feature matrix X or target vector y is empty after processing.")
             return
+
+        X = training_df[actual_features]
+        y = training_df['target'].astype(int)
 
         self.label_encoder.fit(y)
         y_encoded = self.label_encoder.transform(y)

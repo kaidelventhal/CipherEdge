@@ -18,9 +18,15 @@ logger = get_logger(__name__)
 class MLForecasterStrategy(BaseStrategy):
     """
     A stateful strategy that uses an ML price forecaster to generate trading signals.
-    It maintains a history of data to pass to the model for each prediction.
+    **IMPROVEMENT**: Can now accept a pre-initialized inference_engine to leverage caching.
     """
-    def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        symbol: str,
+        timeframe: str,
+        params: Optional[Dict[str, Any]] = None,
+        inference_engine: Optional[Any] = None  # Accept a pre-loaded engine
+    ):
         super().__init__(symbol, timeframe, params)
         
         self.model_config_section = self.params.get('modelconfigsection', 'LightGBM_Forecaster')
@@ -32,7 +38,11 @@ class MLForecasterStrategy(BaseStrategy):
         self.exit_short_threshold = float(self.params.get('exitshortthreshold', 0.0))
         self.min_prediction_confidence = float(self.params.get('minpredictionconfidence', 0.0))
         
-        self.inference_engine = self._initialize_inference_engine()
+        # Use cached engine if provided, otherwise initialize a new one
+        if inference_engine:
+            self.inference_engine = inference_engine
+        else:
+            self.inference_engine = self._initialize_inference_engine()
         
         logger.info(
             f"Initialized MLForecasterStrategy for {symbol} ({timeframe}) "
@@ -57,9 +67,7 @@ class MLForecasterStrategy(BaseStrategy):
 
     def prepare_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        For ML strategies, prepare_data might only add basic indicators like ATR
-        that don't depend on the ML model itself. Feature creation for the model
-        is handled by the inference engine on the fly.
+        Calculates ATR for compatibility with risk management modules.
         """
         df = data.copy()
         atr_period = int(self.params.get('atr_period', 14))
@@ -68,7 +76,6 @@ class MLForecasterStrategy(BaseStrategy):
         return df
 
     def on_bar_data(self, current_bar: BarData) -> Union[Optional[SignalType], List[SignalCommand]]:
-        # This is a stateful strategy, so it must update its internal history.
         self.update_data_history(current_bar)
         
         if self.inference_engine is None or self.inference_engine.forecaster.model is None:

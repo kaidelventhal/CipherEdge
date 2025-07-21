@@ -20,6 +20,7 @@ class BaseStrategy(ABC):
     Abstract base class for all trading strategies.
     """
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
+        self._name = self.__class__.__name__
         self.symbol = symbol
         self.timeframe = timeframe
         self.params = params if params is not None else {}
@@ -38,7 +39,11 @@ class BaseStrategy(ABC):
 
     @property
     def name(self) -> str:
-        return self.__class__.__name__
+        return self._name
+
+    @name.setter
+    def name(self, value: str):
+        self._name = value
 
     def update_data_history(self, current_bar: BarData):
         """Helper method for stateful strategies to append the latest bar data."""

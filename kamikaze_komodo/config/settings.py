@@ -1,6 +1,7 @@
 # FILE: kamikaze_komodo/config/settings.py
 import configparser
 import os
+import json
 from kamikaze_komodo.app_logger import get_logger
 from typing import Dict, List, Optional, Any
 
@@ -181,6 +182,35 @@ class Config:
         if not self.rss_feeds:
             logger.warning("No RSS feeds configured in config.ini under [AI_NewsAnalysis] with 'RSSFeed_' prefix.")
 
+        # --- Phase 3: Strategy Discovery & Portfolio Construction ---
+        try:
+            self.PHASE3_SYMBOLS = json.loads(self.config.get('Phase3', 'PHASE3_SYMBOLS', fallback='[]'))
+            self.PHASE3_STRATEGIES = json.loads(self.config.get('Phase3', 'PHASE3_STRATEGIES', fallback='[]'))
+            self.PHASE3_RISK_MODULES = json.loads(self.config.get('Phase3', 'PHASE3_RISK_MODULES', fallback='[]'))
+            self.PHASE3_STOP_MANAGERS = json.loads(self.config.get('Phase3', 'PHASE3_STOP_MANAGERS', fallback='[]'))
+            self.PHASE3_TOP_COMBOS_COUNT = self.config.getint('Phase3', 'PHASE3_TOP_COMBOS_COUNT', fallback=5)
+            self.PHASE3_COMPUTE_WEIGHTS_METHOD = self.config.get('Phase3', 'PHASE3_COMPUTE_WEIGHTS_METHOD', fallback='risk_parity')
+            self.PHASE3_COMPOSITE_METHOD = self.config.get('Phase3', 'PHASE3_COMPOSITE_METHOD', fallback='weighted_vote')
+
+            # **NEW**: Parse the Grid Search parameters
+            self.PHASE3_GRID_SEARCH = {}
+            if self.config.has_section('Phase3_GridSearch'):
+                for key, value in self.config.items('Phase3_GridSearch'):
+                    try:
+                        self.PHASE3_GRID_SEARCH[key] = json.loads(value)
+                    except json.JSONDecodeError:
+                        logger.error(f"Could not parse grid search params for '{key}'. Invalid JSON: {value}")
+            
+        except (json.JSONDecodeError, configparser.NoSectionError) as e:
+            logger.warning(f"Could not load Phase3 settings from config.ini: {e}. Using empty defaults.")
+            self.PHASE3_SYMBOLS = []
+            self.PHASE3_STRATEGIES = []
+            self.PHASE3_RISK_MODULES = []
+            self.PHASE3_STOP_MANAGERS = []
+            self.PHASE3_TOP_COMBOS_COUNT = 5
+            self.PHASE3_COMPUTE_WEIGHTS_METHOD = "risk_parity"
+            self.PHASE3_COMPOSITE_METHOD = "weighted_vote"
+            self.PHASE3_GRID_SEARCH = {}
 
     def get_strategy_params(self, strategy_or_component_name: str) -> dict:
         """

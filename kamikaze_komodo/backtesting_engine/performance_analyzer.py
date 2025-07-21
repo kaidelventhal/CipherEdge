@@ -210,9 +210,9 @@ class PerformanceAnalyzer:
 
         summary = f"""
         --------------------------------------------------
-        |          Backtest Performance Summary          |
+        |                Backtest Performance Summary                 |
         --------------------------------------------------
-        | Metric                       | Value               |
+        | Metric                       | Value                |
         --------------------------------------------------
         | Initial Capital              | ${metrics.get("initial_capital", 0):<15,.2f} |
         | Final Capital                | ${metrics.get("final_capital", 0):<15,.2f} |
@@ -270,25 +270,28 @@ class PerformanceAnalyzer:
         n_trials = len(sharpe_ratios_series)
         var_sr = sharpe_ratios_series.var()
 
-        if pd.isna(var_sr) or var_sr == 0:
-            logger.warning("Variance of Sharpe Ratios is zero or NaN. Cannot calculate DSR.")
-            return None
+        if pd.isna(var_sr) or var_sr <= 0:
+            logger.warning(f"Variance of Sharpe Ratios is not usable ({var_sr}). Cannot calculate DSR.")
+            return 0.0 if not pd.isna(selected_sharpe) else None
         
         # Expected maximum Sharpe Ratio approximation
         euler_mascheroni = 0.5772156649
-        e_max_sr = ( (1 - euler_mascheroni) * norm.ppf(1 - 1/n_trials) ) + \
-                   ( euler_mascheroni * norm.ppf(1 - 1/(n_trials * np.e)) )
+        e_max_sr = ((1 - euler_mascheroni) * norm.ppf(1 - 1/n_trials)) + \
+                   (euler_mascheroni * norm.ppf(1 - 1/(n_trials * np.e)))
         
         # Deflated Sharpe Ratio Calculation
         # DSR = P[SR_real <= SR_selected | N trials] = CDF of Z score
         try:
             # The Z-score compares the selected SR to the expected maximum SR from random trials
-            z_score = (selected_sharpe - (e_max_sr * np.sqrt(var_sr))) * \
-                      np.sqrt(num_bars_in_backtest - 1)
+            denominator = np.sqrt(var_sr * (1 - (1/num_bars_in_backtest)) + (selected_sharpe**2 / (2*num_bars_in_backtest)) * (1 - var_sr))
+            if denominator == 0:
+                return 1.0 if selected_sharpe > 0 else 0.0
+
+            z_score = (selected_sharpe - e_max_sr * np.sqrt(var_sr)) / denominator
             
             deflated_sharpe = norm.cdf(z_score)
-            logger.info(f"DSR Calculation: N_trials={n_trials}, Var(SR)={var_sr:.4f}, E[MaxSR]={e_max_sr:.4f}, SelectedSR={selected_sharpe:.4f}, Z-Score={z_score:.4f}")
+            logger.debug(f"DSR Calc: N_trials={n_trials}, Var(SR)={var_sr:.4f}, E[MaxSR]={e_max_sr:.4f}, SelectedSR={selected_sharpe:.4f}, Z-Score={z_score:.4f}")
             return deflated_sharpe
-        except Exception as e:
+        except (ValueError, ZeroDivisionError) as e:
             logger.error(f"Error calculating Deflated Sharpe Ratio: {e}", exc_info=True)
             return None

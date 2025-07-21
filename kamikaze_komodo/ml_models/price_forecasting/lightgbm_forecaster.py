@@ -2,7 +2,7 @@
 import lightgbm as lgb
 import pandas as pd
 import numpy as np
-import joblib # For saving/loading model
+import joblib 
 from typing import Optional, Dict, Any, List, Union
 from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
 from kamikaze_komodo.ml_models.feature_engineering import (
@@ -21,16 +21,9 @@ class LightGBMForecaster(BasePriceForecaster):
     def __init__(self, model_path: Optional[str] = None, params: Optional[Dict[str, Any]] = None):
         super().__init__(model_path, params)
         self.default_lgbm_params = {
-            'objective': 'regression_l1',
-            'metric': 'rmse',
-            'n_estimators': 100,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbose': -1,
-            'n_jobs': -1,
-            'seed': 42,
+            'objective': 'regression_l1', 'metric': 'rmse', 'n_estimators': 100,
+            'learning_rate': 0.05, 'feature_fraction': 0.9, 'bagging_fraction': 0.8,
+            'bagging_freq': 5, 'verbose': -1, 'n_jobs': -1, 'seed': 42,
             'boosting_type': 'gbdt',
         }
         config_lgbm_params = {k.replace('lgbm_params_', ''): v for k, v in self.params.items() if k.startswith('lgbm_params_')}
@@ -40,9 +33,6 @@ class LightGBMForecaster(BasePriceForecaster):
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Creates features by calling centralized feature engineering functions.
-        """
         if data.empty:
             logger.warning("Data for feature creation is empty.")
             return pd.DataFrame()
@@ -53,7 +43,6 @@ class LightGBMForecaster(BasePriceForecaster):
         df = add_technical_indicators(df)
         df = add_sentiment_features(df)
         df = add_cyclical_time_features(df)
-        
         df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
@@ -69,28 +58,28 @@ class LightGBMForecaster(BasePriceForecaster):
                 return
             df['target'] = df[target_column]
 
-        df.dropna(subset=['target'], inplace=True) 
         df_with_all_features = self.create_features(df)
         
         if feature_columns_to_use:
             actual_features_present = [col for col in feature_columns_to_use if col in df_with_all_features.columns]
         else:
-            # Default feature selection if none provided
             actual_features_present = [col for col in df_with_all_features.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'symbol', 'timeframe', 'target']]
 
         if not actual_features_present:
             logger.error("No valid feature columns found for training. Cannot train.")
             return
 
-        X_final_features = df_with_all_features[actual_features_present].copy()
-        X_final_features.dropna(inplace=True) 
-        y_train = df_with_all_features.loc[X_final_features.index, 'target'] 
-        X_train = X_final_features
-        
-        if X_train.empty or y_train.empty:
+        # FIX: Combine features and target into a new DF, then drop NaNs to avoid losing all data
+        training_df = df_with_all_features[actual_features_present + ['target']].copy()
+        training_df.dropna(inplace=True)
+
+        if training_df.empty:
             logger.error("Feature matrix or target vector is empty after processing. Training cannot proceed.")
             return
 
+        X_train = training_df[actual_features_present]
+        y_train = training_df['target']
+        
         self.model = lgb.LGBMRegressor(**self.lgbm_params)
         logger.info(f"Training LightGBM model with {len(X_train)} samples. Features: {list(X_train.columns)}")
         try:
@@ -113,7 +102,6 @@ class LightGBMForecaster(BasePriceForecaster):
             logger.error("No feature columns determined for prediction.")
             return None
 
-        # Ensure prediction features are present
         cols_for_prediction = [col for col in cols_for_prediction if col in df_with_all_features.columns]
         
         X_new = df_with_all_features[cols_for_prediction].copy()
