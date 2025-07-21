@@ -197,10 +197,10 @@ class StrategyOptimizer:
             dominant_regime = self._get_dominant_regime(symbol)
              
             for strat_name in strategy_names:
-                if dominant_regime is not None:
-                    is_trending_regime = dominant_regime == 1 
-                    if strat_name in TREND_STRATEGIES and not is_trending_regime: continue
-                    if strat_name in MEAN_REVERSION_STRATEGIES and is_trending_regime: continue
+                #if dominant_regime is not None:
+                #    is_trending_regime = dominant_regime == 1 
+                #    if strat_name in TREND_STRATEGIES and not is_trending_regime: continue
+                #    if strat_name in MEAN_REVERSION_STRATEGIES and is_trending_regime: continue
 
                 base_params = app_settings.get_strategy_params(strat_name)
                 grid_key = strat_name.split('_')[0]

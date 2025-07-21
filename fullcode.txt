@@ -20,6 +20,7 @@ from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
 from kamikaze_komodo.data_handling.data_handler import DataHandler
 from kamikaze_komodo.backtesting_engine.optimizer import StrategyOptimizer
 from kamikaze_komodo.portfolio_constructor.meta_portfolio_constructor import MultiStrategyPortfolioConstructor
+from kamikaze_komodo.risk_control_module.risk_manager import RiskManager
 from kamikaze_komodo.ml_models.training_pipelines.lightgbm_pipeline import LightGBMTrainingPipeline
 from kamikaze_komodo.ml_models.training_pipelines.xgboost_classifier_pipeline import XGBoostClassifierTrainingPipeline
 from kamikaze_komodo.ml_models.training_pipelines.lstm_pipeline import LSTMTrainingPipeline
@@ -32,7 +33,7 @@ logger = get_logger(__name__)
 
 async def train_all_models_if_needed():
     """
-    Checks for the existence of required ML models and trains them if they are missing.
+    Checks for the existence of required ML models and trains them only if they are missing and needed.
     """
     root_logger.info("Checking for pre-trained ML models...")
     if not settings:
@@ -41,10 +42,49 @@ async def train_all_models_if_needed():
 
     symbols_to_check = settings.PHASE3_SYMBOLS or [settings.default_symbol]
     timeframe = settings.default_timeframe
+    strategies_in_use = settings.PHASE3_STRATEGIES
+
+    # Determine which types of models are actually needed by the configured strategies
+    needs_ml_models = any(s.startswith("MLForecaster") or s.startswith("Ensemble") for s in strategies_in_use)
+    # The regime model is always needed for the optimizer's regime-aware filtering feature
+    needs_regime_model = True
 
     for symbol in symbols_to_check:
         root_logger.info(f"--- Checking models for {symbol} ---")
-        # ... (rest of the logic is unchanged, included for completeness)
+        
+        models_to_check = {
+            "LGBM": (LightGBMTrainingPipeline, f"lgbm_{symbol.replace('/', '_').lower()}_{timeframe}.joblib"),
+            "XGB_Classifier": (XGBoostClassifierTrainingPipeline, f"xgb_classifier_{symbol.replace('/', '_').lower()}_{timeframe}.joblib"),
+            "LSTM": (LSTMTrainingPipeline, f"lstm_{symbol.replace('/', '_').lower()}_{timeframe}.pth"),
+            "KMeans_Regime": (KMeansRegimeTrainingPipeline, f"kmeans_regime_{symbol.replace('/', '_').lower()}_{timeframe}.joblib"),
+        }
+        
+        for model_name, (pipeline_class, model_filename) in models_to_check.items():
+            # Skip training if this model type is not required by the config
+            if "KMeans" in model_name and not needs_regime_model:
+                logger.info(f"Skipping KMeans model check for {symbol} as it's not required by the current configuration.")
+                continue
+            if ("LGBM" in model_name or "XGB" in model_name or "LSTM" in model_name) and not needs_ml_models:
+                logger.info(f"Skipping {model_name} model check for {symbol} as it's not required by the current configuration.")
+                continue
+
+            model_path = os.path.join(PROJECT_ROOT, 'ml_models/trained_models', model_filename)
+            if not os.path.exists(model_path):
+                root_logger.warning(f"{model_name} model not found for {symbol} at {model_path}. Starting training...")
+                try:
+                    pipeline = pipeline_class(symbol=symbol, timeframe=timeframe)
+                    await pipeline.run_training()
+                    
+                    # FIX: Verify that the model file was actually created before logging success
+                    if os.path.exists(model_path):
+                        root_logger.info(f"Successfully trained and saved {model_name} model for {symbol}.")
+                    else:
+                        root_logger.error(f"Training for {model_name} for {symbol} ran, but the model file was NOT created at {model_path}.")
+                except Exception as e:
+                    root_logger.error(f"Failed to train {model_name} model for {symbol}: {e}", exc_info=True)
+            else:
+                root_logger.info(f"Found existing {model_name} model for {symbol}.")
+
 
 async def run_phase3_discovery(data_handler: DataHandler):
     """
@@ -61,29 +101,87 @@ async def run_phase3_discovery(data_handler: DataHandler):
     start_date = datetime.now(timezone.utc) - timedelta(days=hist_days)
     end_date = datetime.now(timezone.utc)
 
-    # ... (rest of the logic is unchanged, included for completeness)
+    data_feeds = {}
+    for symbol in all_symbols:
+        root_logger.info(f"Fetching historical data for {symbol}...")
+        df = await data_handler.get_prepared_data(
+            symbol=symbol, timeframe=timeframe, start_date=start_date, end_date=end_date,
+            needs_funding_rate=True, needs_sentiment=True
+        )
+        if not df.empty:
+            data_feeds[symbol] = df
+        else:
+            root_logger.error(f"Failed to fetch data for {symbol}. It will be excluded from the analysis.")
+
+    if not data_feeds:
+        root_logger.critical("No data could be fetched for any symbol. Aborting Phase 3.")
+        return
+
+    optimizer = StrategyOptimizer(
+        data_feeds=data_feeds, initial_capital=10000.0,
+        commission_bps=settings.commission_bps, slippage_bps=settings.slippage_bps
+    )
+    
+    results_df, equity_curves = optimizer.run_phase3_discovery()
+    
+    if results_df.empty:
+        root_logger.error("Strategy discovery yielded no results. Portfolio construction aborted.")
+        return
+
+    risk_manager = RiskManager(settings=settings)
+    portfolio_constructor = MultiStrategyPortfolioConstructor(settings=settings, risk_manager=risk_manager)
+    
+    top_n = settings.PHASE3_TOP_COMBOS_COUNT
+    selected_ids = portfolio_constructor.select_top_n(
+        trials_df=results_df, equity_curves=equity_curves, n=top_n
+    )
+
+    if not selected_ids:
+        root_logger.warning("No top combinations were selected after filtering. Portfolio construction aborted.")
+        return
+
+    weights = portfolio_constructor.compute_weights(
+        selected_ids=selected_ids, equity_curves=equity_curves,
+        method=settings.PHASE3_COMPUTE_WEIGHTS_METHOD
+    )
+
+    root_logger.info("--- Top Performing & Diversified Combinations ---")
+    top_combos_df = results_df.loc[selected_ids].copy()
+    for combo_id, weight in weights.items():
+        top_combos_df.loc[combo_id, 'portfolio_weight'] = weight
+
+    display_cols = [
+        'symbol', 'strategy_name', 'position_sizer_name', 'stop_manager_name',
+        'sharpe_ratio', 'deflated_sharpe_ratio', 'total_return_pct', 'max_drawdown_pct',
+        'portfolio_weight', 'strategy_params'
+    ]
+    display_cols = [col for col in display_cols if col in top_combos_df.columns]
+
+    pd.set_option('display.max_rows', 500)
+    pd.set_option('display.max_columns', 500)
+    pd.set_option('display.width', 1000)
+
+    root_logger.info(f"\n{top_combos_df[display_cols].to_string()}")
+    root_logger.info("--- Phase 3 Discovery Complete ---")
+
 
 async def main():
     root_logger.info("Kamikaze Komodo Program Starting...")
     if not settings:
         root_logger.critical("Settings failed to load. Application cannot start.")
         return
-    
+     
     data_handler = DataHandler()
     try:
         await train_all_models_if_needed()
         await run_phase3_discovery(data_handler)
     finally:
-        # **IMPROVEMENT**: Ensure data_handler connections are always closed
         await data_handler.close()
         root_logger.info("Data handler connections closed.")
 
     root_logger.info("Kamikaze Komodo Program Finished.")
 
 if __name__ == "__main__":
-    # **FIX**: Set the multiprocessing start method to 'spawn'.
-    # This is crucial for preventing deadlocks with libraries like asyncio and aiohttp
-    # by ensuring child processes start fresh instead of inheriting parent state.
     try:
         if multiprocessing.get_start_method() != 'spawn':
             multiprocessing.set_start_method('spawn', force=True)
@@ -91,11 +189,10 @@ if __name__ == "__main__":
     except RuntimeError:
         root_logger.info("Multiprocessing context already set.")
 
-
     try:
         if settings and settings.sentiment_llm_provider == "VertexAI" and not settings.vertex_ai_project_id:
             root_logger.warning("Vertex AI is selected, but Project ID is not set in config.ini. AI features may fail.")
-        
+         
         if not os.path.exists("logs"):
             os.makedirs("logs")
 
@@ -582,9 +679,6 @@ def run_single_trial(trial_def: Dict[str, Any], data_feed: pd.DataFrame, initial
     """
     trial_id = trial_def.get('id', -1)
     try:
-        # **IMPROVEMENT**: Add detailed print statements for debugging deadlocks.
-        print(f"[Worker PID: {os.getpid()}] Starting trial {trial_id}...")
-        
         engine = BacktestingEngine(
             data_feed_df=data_feed,
             strategy_name=trial_def['strategy_name'],
@@ -597,15 +691,10 @@ def run_single_trial(trial_def: Dict[str, Any], data_feed: pd.DataFrame, initial
             symbol=trial_def['symbol'],
             timeframe=trial_def['timeframe']
         )
-        print(f"[Worker PID: {os.getpid()}] Trial {trial_id}: Engine initialized. Starting run...")
-        
         trades_log, final_portfolio, equity_curve = engine.run()
-        
-        print(f"[Worker PID: {os.getpid()}] Trial {trial_id}: Engine run completed.")
         return trial_id, trades_log, final_portfolio, equity_curve
-        
     except Exception as e:
-        print(f"[Worker PID: {os.getpid()}] FATAL ERROR running trial {trial_id}: {e}")
+        logger.error(f"[Worker PID: {os.getpid()}] FATAL ERROR running trial {trial_id} for {trial_def['symbol']}|{trial_def['strategy_name']}: {e}", exc_info=True)
         return None
 
 
@@ -631,16 +720,16 @@ class StrategyOptimizer:
         """Identifies the dominant market regime over the backtest period."""
         if symbol not in self.data_feeds:
             return None
-        
+         
         df = self.data_feeds[symbol]
         timeframe = app_settings.default_timeframe
         kmeans_config = app_settings.get_strategy_params("KMeans_Regime_Model")
         kmeans_path = os.path.join(PROJECT_ROOT, kmeans_config.get('modelsavepath', 'ml_models/trained_models'), f"kmeans_regime_{symbol.replace('/', '_').lower()}_{timeframe}.joblib")
-        
+         
         if not os.path.exists(kmeans_path):
             logger.warning(f"KMeans model not found at {kmeans_path}. Cannot perform regime-aware filtering for {symbol}.")
             return None
-            
+             
         kmeans_model = KMeansRegimeModel(model_path=kmeans_path, params=kmeans_config)
         if not kmeans_model.model:
             return None
@@ -648,7 +737,7 @@ class StrategyOptimizer:
         df['market_regime'] = kmeans_model.predict_regimes_for_dataframe(df)
         df['market_regime'] = df['market_regime'].ffill()
         dominant_regime = df['market_regime'].mode()[0] if not df['market_regime'].dropna().empty else None
-        
+         
         if dominant_regime is not None:
             regime_name = kmeans_model.regime_labels.get(int(dominant_regime), f"Regime {dominant_regime}")
             logger.info(f"Dominant regime for {symbol} is: {regime_name} ({dominant_regime})")
@@ -666,7 +755,7 @@ class StrategyOptimizer:
 
         all_metrics = []
         equity_curves = {}
-        
+         
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
             futures_to_trials = {
                 executor.submit(
@@ -683,11 +772,11 @@ class StrategyOptimizer:
             for future in pbar:
                 trial_def = futures_to_trials[future]
                 pbar.set_description(f"Processing {trial_def['symbol']} | {trial_def['strategy_name']}")
-                
+                 
                 result = future.result()
                 if result:
                     trial_id, trades_log, final_portfolio, equity_curve = result
-                    
+                     
                     analyzer = PerformanceAnalyzer(
                         trades=trades_log,
                         initial_capital=self.initial_capital,
@@ -695,20 +784,16 @@ class StrategyOptimizer:
                         equity_curve_df=equity_curve
                     )
                     metrics = analyzer.calculate_metrics()
-                    metrics['trial_id'] = trial_id
                     
-                    flat_trial_def = {k: v for k, v in trial_def.items() if k != 'strategy_params'}
-                    flat_trial_def.update({f"param_{k}": v for k, v in trial_def['strategy_params'].items()})
-                    metrics.update(flat_trial_def)
-
+                    metrics.update(trial_def)
                     all_metrics.append(metrics)
                     equity_curves[trial_id] = equity_curve['total_value_usd']
 
         if not all_metrics:
             logger.error("No metrics were generated from the backtest run.")
             return pd.DataFrame(), {}
-            
-        results_df = pd.DataFrame(all_metrics).set_index('trial_id')
+             
+        results_df = pd.DataFrame(all_metrics).set_index('id')
         sharpe_series = results_df['sharpe_ratio'].dropna()
         num_bars = len(next(iter(self.data_feeds.values())))
 
@@ -720,9 +805,29 @@ class StrategyOptimizer:
             ) if pd.notna(x) else np.nan
         )
 
-        results_df.to_csv("trial_results.csv")
+        results_for_csv = results_df.copy().reset_index().rename(columns={'id': 'trial_id'})
+        results_for_csv['id'] = results_for_csv['trial_id']
+
+        csv_columns = [
+            'trial_id', 'initial_capital', 'final_capital', 'total_net_profit',
+            'total_return_pct', 'total_trades', 'winning_trades', 'losing_trades',
+            'breakeven_trades', 'win_rate_pct', 'loss_rate_pct',
+            'average_pnl_per_trade', 'average_win_pnl', 'average_loss_pnl',
+            'profit_factor', 'max_drawdown_pct', 'sharpe_ratio', 'sortino_ratio',
+            'calmar_ratio', 'total_fees_paid', 'average_holding_period_hours',
+            'longest_win_streak', 'longest_loss_streak', 'time_in_market_pct',
+            'turnover_rate', 'id', 'symbol', 'timeframe', 'strategy_name',
+            'position_sizer_name', 'stop_manager_name', 'strategy_params',
+            'deflated_sharpe_ratio'
+        ]
+
+        for col in csv_columns:
+            if col not in results_for_csv.columns:
+                results_for_csv[col] = pd.NA
+
+        results_for_csv[csv_columns].to_csv("trial_results.csv", index=False)
         logger.info("Phase 3 discovery finished. Results saved to 'trial_results.csv'.")
-        
+         
         return results_df, equity_curves
 
     def _generate_trials(self) -> List[Dict[str, Any]]:
@@ -732,23 +837,23 @@ class StrategyOptimizer:
         sizer_names = app_settings.PHASE3_RISK_MODULES
         stop_names = app_settings.PHASE3_STOP_MANAGERS
         param_grids = app_settings.PHASE3_GRID_SEARCH
-        
+         
         trials = []
         trial_id_counter = 0
 
         for symbol in symbols:
             dominant_regime = self._get_dominant_regime(symbol)
-            
+             
             for strat_name in strategy_names:
-                if dominant_regime is not None:
-                    is_trending_regime = dominant_regime == 1 
-                    if strat_name in TREND_STRATEGIES and not is_trending_regime: continue
-                    if strat_name in MEAN_REVERSION_STRATEGIES and is_trending_regime: continue
+                #if dominant_regime is not None:
+                #    is_trending_regime = dominant_regime == 1 
+                #    if strat_name in TREND_STRATEGIES and not is_trending_regime: continue
+                #    if strat_name in MEAN_REVERSION_STRATEGIES and is_trending_regime: continue
 
                 base_params = app_settings.get_strategy_params(strat_name)
                 grid_key = strat_name.split('_')[0]
                 grid = param_grids.get(grid_key, {})
-                
+                 
                 param_combinations = []
                 if not grid:
                     param_combinations.append(base_params)
@@ -758,7 +863,7 @@ class StrategyOptimizer:
                         combo = dict(zip(keys, v))
                         full_params = {**base_params, **combo}
                         param_combinations.append(full_params)
-                
+                 
                 for params in param_combinations:
                     for sizer_name in sizer_names:
                         for stop_name in stop_names:
@@ -773,7 +878,7 @@ class StrategyOptimizer:
                             }
                             trials.append(trial_def)
                             trial_id_counter += 1
-        
+         
         logger.info(f"Generated {len(trials)} trials for discovery with parameter grid search.")
         return trials
 </code>
@@ -1147,13 +1252,13 @@ class BacktestingEngine:
         self.strategy = StrategyManager.create_strategy(strategy_name, symbol, timeframe, strategy_params)
         self.position_sizer = POSITION_SIZER_REGISTRY[position_sizer_name](params=settings.get_strategy_params('RiskManagement'))
         self.stop_manager = STOP_MANAGER_REGISTRY[stop_manager_name](params=settings.get_strategy_params('RiskManagement'))
-        
+         
         if not all([self.strategy, self.position_sizer, self.stop_manager]):
             raise ValueError("Failed to instantiate one or more components for the backtest.")
 
         self.prepared_data_feed = self.strategy.prepare_data(data_feed_df.copy())
         self.bar_data_list = self._pre_convert_to_bardata(self.prepared_data_feed)
-        
+         
         self.initial_capital = initial_capital
         self.commission_rate = commission_bps / 10000.0
         self.slippage_bps = slippage_bps
@@ -1206,7 +1311,7 @@ class BacktestingEngine:
             execution_price = self._apply_slippage(execution_price_ideal, side)
             cost = position_size * execution_price
             commission = cost * self.commission_rate
-            
+             
             if side == OrderSide.BUY and cost + commission > self.current_cash: return
 
             self.current_cash -= commission
@@ -1233,14 +1338,16 @@ class BacktestingEngine:
 
         exit_value = trade.amount * exit_price
         exit_commission = exit_value * self.commission_rate
+         
+        entry_cost = trade.amount * trade.entry_price
         
         if trade.side == OrderSide.BUY:
-            pnl = (exit_price - trade.entry_price) * trade.amount
+            pnl = exit_value - entry_cost
             self.current_cash += exit_value
-        else:
-            pnl = (trade.entry_price - exit_price) * trade.amount
+        else: # SELL
+            pnl = entry_cost - exit_value
             self.current_cash -= exit_value
-        
+         
         pnl -= (trade.commission + exit_commission)
         self.current_cash -= exit_commission
 
@@ -1251,7 +1358,7 @@ class BacktestingEngine:
         trade.result = TradeResult.WIN if pnl > 0 else (TradeResult.LOSS if pnl < 0 else TradeResult.BREAKEVEN)
         trade.notes = reason
         self.trades_log.append(trade)
-        
+         
         if isinstance(self.stop_manager, TripleBarrierStop):
             self.stop_manager.reset_for_trade(trade.id)
 
@@ -1259,12 +1366,12 @@ class BacktestingEngine:
         for symbol, trade in list(self.active_trades.items()):
             stop_loss_price = self.stop_manager.check_stop_loss(trade, current_bar, bar_index, data_history_for_sar=self.prepared_data_feed.iloc[:bar_index+1])
             take_profit_price = self.stop_manager.check_take_profit(trade, current_bar)
-            
+             
             if stop_loss_price is not None:
                 self._close_active_trade(symbol, current_bar.timestamp, stop_loss_price, "StopLoss")
             elif take_profit_price is not None:
                 self._close_active_trade(symbol, current_bar.timestamp, take_profit_price, "TakeProfit")
-    
+     
     def run(self) -> tuple[List[Trade], Dict[str, Any], pd.DataFrame]:
         if not self.bar_data_list:
             return [], {"initial_capital": self.initial_capital, "final_portfolio_value": self.initial_capital}, pd.DataFrame([{"timestamp": pd.Timestamp.now(tz='UTC'), "total_value_usd": self.initial_capital}]).set_index('timestamp')
@@ -1274,19 +1381,21 @@ class BacktestingEngine:
 
         for bar_index, current_bar_data in enumerate(self.bar_data_list):
             # **FIX**: Correct Mark-to-Market calculation for portfolio equity
-            unrealized_pnl = 0.0
+            mtm_value = self.current_cash
             for trade in self.active_trades.values():
                 if trade.side == OrderSide.BUY:
-                    unrealized_pnl += (current_bar_data.close - trade.entry_price) * trade.amount
-                else: # SHORT
-                    unrealized_pnl += (trade.entry_price - current_bar_data.close) * trade.amount
+                    mtm_value += trade.amount * current_bar_data.close
+                else:  # SHORT
+                    unrealized_pnl = (trade.entry_price - current_bar_data.close) * trade.amount
+                    # For shorts, equity is the cash received minus the current liability to buy back
+                    # The cash from the sale is already in self.current_cash, so we add the unrealized PnL
+                    mtm_value += unrealized_pnl
             
-            mtm_value = self.current_cash + unrealized_pnl
             self.portfolio_history.append({"timestamp": current_bar_data.timestamp, "total_value_usd": mtm_value})
 
             self._handle_stop_take_profit(current_bar_data, bar_index)
             strategy_output = self.strategy.on_bar_data(current_bar_data)
-            
+             
             if strategy_output and strategy_output != SignalType.HOLD:
                 commands = strategy_output if isinstance(strategy_output, list) else [SignalCommand(signal_type=strategy_output, symbol=self.strategy.symbol)]
                 for command in commands:
@@ -2645,10 +2754,10 @@ Component_2_Weight = 0.5
 Method = weighted_vote
 
 [Phase3]
-PHASE3_SYMBOLS = ["PF_XBTUSD", "PF_ETHUSD", "PF_XRPUSD"]
-PHASE3_STRATEGIES = ["BollingerBandMeanReversionStrategy", "MLForecasterStrategy", "MLForecasterStrategy_LSTM"]
-PHASE3_RISK_MODULES = ["OptimalFPositionSizer", "ATRBasedPositionSizer"]
-PHASE3_STOP_MANAGERS = ["PercentageStopManager", "TripleBarrierStopManager", "ParabolicSARStop"]
+PHASE3_SYMBOLS = ["PF_ETHUSD"]
+PHASE3_STRATEGIES = ["EWMACStrategy","BollingerBandBreakoutStrategy","VolatilitySqueezeBreakoutStrategy","BollingerBandMeanReversionStrategy","EhlersInstantaneousTrendlineStrategy"]
+PHASE3_RISK_MODULES = ["OptimalFPositionSizer", "ATRBasedPositionSizer","FixedFractionalPositionSizer"]
+PHASE3_STOP_MANAGERS = ["PercentageStopManager", "TripleBarrierStopManager", "ParabolicSARStop","ATRStopManager"]
 PHASE3_TOP_COMBOS_COUNT = 5
 PHASE3_COMPUTE_WEIGHTS_METHOD = "risk_parity"
 PHASE3_COMPOSITE_METHOD = "weighted_vote"
@@ -2657,7 +2766,6 @@ PHASE3_COMPOSITE_METHOD = "weighted_vote"
 BollingerBandMeanReversionStrategy = {"bb_period": [20, 30], "bb_std_dev": [1.9, 2.1]}
 MLForecasterStrategy = {"long_threshold": [0.0004, 0.0006], "short_threshold": [-0.0004, -0.0006]}
 MLForecasterStrategy_LSTM = {"long_threshold": [0.0004, 0.0006], "short_threshold": [-0.0004, -0.0006]}
-
 
 </code>
 
@@ -3485,7 +3593,7 @@ kamikaze_komodo/ml_models/price_forecasting/lightgbm_forecaster.py:
 import lightgbm as lgb
 import pandas as pd
 import numpy as np
-import joblib # For saving/loading model
+import joblib 
 from typing import Optional, Dict, Any, List, Union
 from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
 from kamikaze_komodo.ml_models.feature_engineering import (
@@ -3504,16 +3612,9 @@ class LightGBMForecaster(BasePriceForecaster):
     def __init__(self, model_path: Optional[str] = None, params: Optional[Dict[str, Any]] = None):
         super().__init__(model_path, params)
         self.default_lgbm_params = {
-            'objective': 'regression_l1',
-            'metric': 'rmse',
-            'n_estimators': 100,
-            'learning_rate': 0.05,
-            'feature_fraction': 0.9,
-            'bagging_fraction': 0.8,
-            'bagging_freq': 5,
-            'verbose': -1,
-            'n_jobs': -1,
-            'seed': 42,
+            'objective': 'regression_l1', 'metric': 'rmse', 'n_estimators': 100,
+            'learning_rate': 0.05, 'feature_fraction': 0.9, 'bagging_fraction': 0.8,
+            'bagging_freq': 5, 'verbose': -1, 'n_jobs': -1, 'seed': 42,
             'boosting_type': 'gbdt',
         }
         config_lgbm_params = {k.replace('lgbm_params_', ''): v for k, v in self.params.items() if k.startswith('lgbm_params_')}
@@ -3523,9 +3624,6 @@ class LightGBMForecaster(BasePriceForecaster):
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """
-        Creates features by calling centralized feature engineering functions.
-        """
         if data.empty:
             logger.warning("Data for feature creation is empty.")
             return pd.DataFrame()
@@ -3536,9 +3634,7 @@ class LightGBMForecaster(BasePriceForecaster):
         df = add_technical_indicators(df)
         df = add_sentiment_features(df)
         df = add_cyclical_time_features(df)
-        
-        # **FIX**: Centralized the replace logic in feature_engineering.py
-        # This line is now removed from here.
+        df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
     def train(self, historical_data: pd.DataFrame, target_column: str = 'close_change_lag_1_future', feature_columns_to_use: Optional[List[str]] = None):
@@ -3553,28 +3649,28 @@ class LightGBMForecaster(BasePriceForecaster):
                 return
             df['target'] = df[target_column]
 
-        df.dropna(subset=['target'], inplace=True) 
         df_with_all_features = self.create_features(df)
         
         if feature_columns_to_use:
             actual_features_present = [col for col in feature_columns_to_use if col in df_with_all_features.columns]
         else:
-            # Default feature selection if none provided
             actual_features_present = [col for col in df_with_all_features.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'symbol', 'timeframe', 'target']]
 
         if not actual_features_present:
             logger.error("No valid feature columns found for training. Cannot train.")
             return
 
-        X_final_features = df_with_all_features[actual_features_present].copy()
-        X_final_features.dropna(inplace=True) 
-        y_train = df_with_all_features.loc[X_final_features.index, 'target'] 
-        X_train = X_final_features
-        
-        if X_train.empty or y_train.empty:
+        # FIX: Combine features and target into a new DF, then drop NaNs to avoid losing all data
+        training_df = df_with_all_features[actual_features_present + ['target']].copy()
+        training_df.dropna(inplace=True)
+
+        if training_df.empty:
             logger.error("Feature matrix or target vector is empty after processing. Training cannot proceed.")
             return
 
+        X_train = training_df[actual_features_present]
+        y_train = training_df['target']
+        
         self.model = lgb.LGBMRegressor(**self.lgbm_params)
         logger.info(f"Training LightGBM model with {len(X_train)} samples. Features: {list(X_train.columns)}")
         try:
@@ -3597,7 +3693,6 @@ class LightGBMForecaster(BasePriceForecaster):
             logger.error("No feature columns determined for prediction.")
             return None
 
-        # Ensure prediction features are present
         cols_for_prediction = [col for col in cols_for_prediction if col in df_with_all_features.columns]
         
         X_new = df_with_all_features[cols_for_prediction].copy()
@@ -3677,15 +3772,9 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         super().__init__(model_path, params)
         
         self.default_xgb_params = {
-            'objective': 'multi:softprob',
-            'eval_metric': 'mlogloss',
-            'n_estimators': 100,
-            'learning_rate': 0.1,
-            'max_depth': 3,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'use_label_encoder': False,
-            'seed': 42,
+            'objective': 'multi:softprob', 'eval_metric': 'mlogloss', 'n_estimators': 100,
+            'learning_rate': 0.1, 'max_depth': 3, 'subsample': 0.8,
+            'colsample_bytree': 0.8, 'use_label_encoder': False, 'seed': 42,
         }
         config_xgb_params = {k.replace('xgb_params_', ''): v for k, v in self.params.items() if k.startswith('xgb_params_')}
         self.xgb_params = {**self.default_xgb_params, **config_xgb_params}
@@ -3697,7 +3786,6 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             self.load_model(self.model_path)
 
     def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Creates features using centralized feature engineering functions."""
         if data.empty: return pd.DataFrame()
         df = data.copy()
         df = add_lag_features(df)
@@ -3705,8 +3793,7 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         df = add_technical_indicators(df)
         df = add_sentiment_features(df)
         df = add_cyclical_time_features(df)
-        # **FIX**: Centralized the replace logic in feature_engineering.py
-        # This line is now removed from here.
+        df = df.replace([np.inf, -np.inf], np.nan)
         return df
 
     def _define_target(self, data: pd.DataFrame, thresholds: Optional[Tuple[float, float]] = (-0.001, 0.001)) -> pd.Series:
@@ -3737,18 +3824,20 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
             logger.error(f"Unsupported target_definition: {target_definition}")
             return
 
-        df.dropna(subset=['target'], inplace=True)
         df_with_features = self.create_features(df)
 
         actual_features = feature_columns or [col for col in df_with_features.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'symbol', 'timeframe', 'target']]
         
-        X = df_with_features[actual_features].copy()
-        X.dropna(inplace=True)
-        y = df_with_features.loc[X.index, 'target'].astype(int)
+        # FIX: Combine features and target into a new DF, then drop NaNs
+        training_df = df_with_features[actual_features + ['target']].copy()
+        training_df.dropna(inplace=True)
 
-        if X.empty or y.empty:
+        if training_df.empty:
             logger.error("Feature matrix X or target vector y is empty after processing.")
             return
+
+        X = training_df[actual_features]
+        y = training_df['target'].astype(int)
 
         self.label_encoder.fit(y)
         y_encoded = self.label_encoder.transform(y)
@@ -4308,7 +4397,6 @@ STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {
     "CompositeStrategy": CompositeStrategy,
 }
 
-# **IMPROVEMENT**: Global cache for ML models to avoid repeated disk loading
 MODEL_CACHE = {}
 
 class StrategyManager:
@@ -4341,27 +4429,58 @@ class StrategyManager:
             if not strategy_class:
                 logger.error(f"Strategy '{strategy_name}' not found in registry.")
                 return None
-        
+         
         strategy_params = params or (settings.get_strategy_params(config_section_name) if settings else {})
-        
-        # **IMPROVEMENT**: Use model cache for ML strategies
+        init_kwargs = init_kwargs or {}
+         
+        if strategy_class == CompositeStrategy:
+            if not settings:
+                logger.error("Settings not available, cannot create CompositeStrategy.")
+                return None
+            
+            comp_params = settings.get_strategy_params('CompositeStrategy')
+            components = []
+            weights = {}
+            i = 1
+            while True:
+                comp_class_name = comp_params.get(f'component_{i}_class')
+                if not comp_class_name: break
+                
+                comp_weight = float(comp_params.get(f'component_{i}_weight', 1.0))
+                
+                component_instance = StrategyManager.create_strategy(
+                    strategy_name=comp_class_name, symbol=symbol, timeframe=timeframe
+                )
+                
+                if component_instance:
+                    components.append(component_instance)
+                    weights[component_instance.name] = comp_weight
+                else:
+                    logger.error(f"Failed to create composite component: {comp_class_name}")
+                i += 1
+            
+            if not components:
+                logger.error("CompositeStrategy defined but no components could be created.")
+                return None
+                
+            init_kwargs['components'] = components
+            init_kwargs['method'] = comp_params.get('method', 'weighted_vote')
+            init_kwargs['weights'] = weights
+
         if strategy_class == MLForecasterStrategy:
             model_config_section = strategy_params.get('modelconfigsection')
             if model_config_section in MODEL_CACHE:
-                # Pass the cached model engine via init_kwargs
-                init_kwargs = init_kwargs or {}
                 init_kwargs['inference_engine'] = MODEL_CACHE[model_config_section]
                 logger.debug(f"Reusing cached model for '{model_config_section}'.")
 
         try:
-            instance = strategy_class(symbol, timeframe, params=strategy_params, **(init_kwargs or {}))
-            
-            # Cache the newly created model engine if it's an ML strategy
+            instance = strategy_class(symbol, timeframe, params=strategy_params, **init_kwargs)
+             
             if strategy_class == MLForecasterStrategy and hasattr(instance, 'inference_engine') and instance.inference_engine:
-                 model_config_section = strategy_params.get('modelconfigsection')
-                 if model_config_section not in MODEL_CACHE:
-                     MODEL_CACHE[model_config_section] = instance.inference_engine
-                     logger.info(f"Cached new ML model instance for '{model_config_section}'.")
+                model_config_section = strategy_params.get('modelconfigsection')
+                if model_config_section not in MODEL_CACHE:
+                    MODEL_CACHE[model_config_section] = instance.inference_engine
+                    logger.info(f"Cached new ML model instance for '{model_config_section}'.")
 
             if strategy_name != strategy_class.__name__:
                 instance.name = strategy_name
@@ -6317,9 +6436,10 @@ kamikaze_komodo/portfolio_constructor/meta_portfolio_constructor.py:
 # FILE: kamikaze_komodo/portfolio_constructor/meta_portfolio_constructor.py
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 
 from kamikaze_komodo.portfolio_constructor.base_portfolio_constructor import BasePortfolioConstructor
+from kamikaze_komodo.risk_control_module.risk_manager import RiskManager
 from kamikaze_komodo.app_logger import get_logger
 
 logger = get_logger(__name__)
@@ -6329,6 +6449,14 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
     Constructs a portfolio from a list of backtested strategy combinations.
     Selects the top N performers and computes their capital allocation weights.
     """
+
+    def __init__(self, settings: Any, risk_manager: RiskManager):
+        """
+        Initializes the constructor. For Phase 3, it inherits from BasePortfolioConstructor
+        as planned, but its primary methods operate independently of the live rebalancing logic.
+        """
+        super().__init__(settings, risk_manager)
+        logger.info("MultiStrategyPortfolioConstructor initialized.")
 
     def select_top_n(
         self,
@@ -6357,7 +6485,6 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
             logger.error(f"Ranking metric '{rank_by}' not found in trials DataFrame. Cannot select top N.")
             return []
 
-        # **IMPROVEMENT**: Pre-filter trials based on the Sharpe ratio threshold
         profitable_trials = trials_df[trials_df['sharpe_ratio'] > sharpe_ratio_threshold]
         if profitable_trials.empty:
             logger.warning(f"No trials met the minimum Sharpe Ratio threshold of {sharpe_ratio_threshold}. No portfolio will be constructed.")
@@ -6365,10 +6492,8 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
             
         logger.info(f"{len(profitable_trials)} trials passed the Sharpe ratio threshold of > {sharpe_ratio_threshold}.")
 
-        # 1. Rank the profitable trials
         ranked_trials = profitable_trials.sort_values(by=rank_by, ascending=False)
-        
-        # 2. Select top N with diversity filter
+         
         selected_ids: List[int] = []
         selected_equity_curves: List[pd.Series] = []
 
@@ -6385,15 +6510,14 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
 
             is_diverse = True
             if selected_equity_curves:
-                # Align current curve with selected curves for correlation calculation
                 combined_df = pd.concat(selected_equity_curves + [current_equity_curve], axis=1).ffill()
                 correlation_matrix = combined_df.corr()
                 correlations_with_new = correlation_matrix.iloc[:-1, -1]
-                
+                 
                 if (correlations_with_new > correlation_threshold).any():
                     is_diverse = False
                     logger.debug(f"Trial {trial_id} is highly correlated with an already selected combo. Skipping.")
-            
+             
             if is_diverse:
                 logger.debug(f"Trial {trial_id} selected. Adding to portfolio.")
                 selected_ids.append(trial_id)
@@ -6423,8 +6547,7 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
         """
         if not selected_ids:
             return {}
-        
-        # **FIX**: Clean the method string to remove potential extra quotes
+         
         clean_method = method.strip().replace('"', '')
 
         weights = {}
@@ -6447,7 +6570,7 @@ class MultiStrategyPortfolioConstructor(BasePortfolioConstructor):
             else:
                 logger.warning("Could not compute risk parity weights, falling back to equal weight.")
                 return self.compute_weights(selected_ids, equity_curves, 'equal')
-        
+         
         elif clean_method == 'performance':
             logger.warning(f"Weighting method '{clean_method}' is not fully implemented. Falling back to 'equal'.")
             return self.compute_weights(selected_ids, equity_curves, 'equal')
@@ -7280,7 +7403,7 @@ class ParabolicSARStop(BaseStopManager):
         super().__init__(params)
         self.acceleration_factor = float(self.params.get('parabolicsar_accelerationfactor', 0.02))
         self.max_acceleration = float(self.params.get('parabolicsar_maxacceleration', 0.2))
-        
+         
         logger.info(f"ParabolicSARStop initialized. AF={self.acceleration_factor}, Max AF={self.max_acceleration}")
 
     def check_stop_loss(
@@ -7297,7 +7420,7 @@ class ParabolicSARStop(BaseStopManager):
         if data_history_for_sar is None or data_history_for_sar.empty:
             logger.warning("Data history not provided for Parabolic SAR calculation.")
             return None
-        
+         
         if len(data_history_for_sar) < 3: # SAR needs at least a few bars
             return None
 
@@ -7309,19 +7432,18 @@ class ParabolicSARStop(BaseStopManager):
                 af=self.acceleration_factor,
                 max_af=self.max_acceleration
             )
-            
-            # pandas_ta returns a DataFrame, we need the SAR value itself, often in a column like 'PSAR_0.02_0.2'
+             
             if sar_values is None or sar_values.empty:
                 return None
-            
+             
             # Get the last value from the first column of the resulting DataFrame
             latest_sar = sar_values.iloc[-1, 0]
 
             if pd.isna(latest_sar):
                 return None
-            
+             
             stop_price = float(latest_sar)
-            
+             
             if current_trade.side == OrderSide.BUY and latest_bar.low <= stop_price:
                 logger.info(f"Parabolic SAR stop (LONG) triggered for {current_trade.symbol} at {stop_price:.4f}")
                 return stop_price
@@ -7331,7 +7453,7 @@ class ParabolicSARStop(BaseStopManager):
 
         except Exception as e:
             logger.error(f"Error calculating Parabolic SAR: {e}", exc_info=True)
-        
+         
         return None
 
     def check_take_profit(self, current_trade: Trade, latest_bar: BarData, **kwargs) -> Optional[float]:
