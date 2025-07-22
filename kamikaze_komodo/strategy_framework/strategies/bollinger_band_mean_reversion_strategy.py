@@ -25,10 +25,16 @@ class BollingerBandMeanReversionStrategy(BaseStrategy):
         if df.empty or len(df) < self.bb_period:
             return pd.DataFrame()
 
+        # ** FIX START **: Calculate bands and then rename columns robustly
         bbands = ta.bbands(df['close'], length=self.bb_period, std=self.bb_std_dev)
-        df['bb_lower'] = bbands[f'BBL_{self.bb_period}_{self.bb_std_dev:.1f}']
-        df['bb_middle'] = bbands[f'BBM_{self.bb_period}_{self.bb_std_dev:.1f}']
-        df['bb_upper'] = bbands[f'BBU_{self.bb_period}_{self.bb_std_dev:.1f}']
+        if bbands is not None and not bbands.empty:
+            # pandas-ta returns columns like 'BBL_20_2.0', 'BBM_20_2.0', etc.
+            # We select them by position (0, 1, 2) to avoid formatting mismatches.
+            df['bb_lower'] = bbands.iloc[:, 0]  # Lower band
+            df['bb_middle'] = bbands.iloc[:, 1] # Middle band
+            df['bb_upper'] = bbands.iloc[:, 2]  # Upper band
+        # ** FIX END **
+
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)
         
         # Vectorized Signal Conditions

@@ -57,8 +57,16 @@ class DataHandler:
             if 'funding_rate' in data_df.columns:
                 data_df = data_df.drop(columns=['funding_rate'])
             
-            logger.info(f"Fetching funding rates for {symbol}...")
-            funding_rates_raw = await self.fetcher.fetch_funding_rate_history(symbol, since=start_date)
+            logger.info(f"Attempting to retrieve funding rates for {symbol} from cache...")
+            funding_rates_raw = self.db_manager.retrieve_funding_rates(symbol, start_date, end_date)
+            
+            if not funding_rates_raw:
+                logger.info(f"Funding rates for {symbol} not in cache for the requested period. Fetching from exchange...")
+                funding_rates_raw = await self.fetcher.fetch_funding_rate_history(symbol, since=start_date)
+                if funding_rates_raw:
+                    logger.info(f"Caching {len(funding_rates_raw)} new funding rate entries.")
+                    self.db_manager.store_funding_rates(funding_rates_raw)
+
             if funding_rates_raw:
                 fr_df = pd.DataFrame(funding_rates_raw)
                 fr_df['timestamp'] = pd.to_datetime(fr_df['timestamp'], unit='ms', utc=True)
@@ -73,7 +81,7 @@ class DataHandler:
                 data_df.rename(columns={'fundingRate': 'funding_rate'}, inplace=True)
                 logger.info("Funding rates merged.")
             else:
-                logger.warning(f"Could not fetch funding rates for {symbol}. Column will be filled with 0.0.")
+                logger.warning(f"Could not fetch or retrieve funding rates for {symbol}. Column will be filled with 0.0.")
                 data_df['funding_rate'] = 0.0
         
         # 3. Add Sentiment data if required

@@ -49,12 +49,12 @@ class LightGBMTrainingPipeline:
         # Fetch data with all potentially needed sources
         data_df = await data_handler.get_prepared_data(
             self.symbol, self.timeframe, start_date, end_date,
-            needs_funding_rate=True, needs_sentiment=True
+            needs_funding_rate=True, needs_sentiment=settings.use_sentiment_in_models if settings else True
         )
         await data_handler.close()
         
         if not data_df.empty:
-             logger.info(f"Fetched and prepared {len(data_df)} bars for training {self.symbol} ({self.timeframe}).")
+            logger.info(f"Fetched and prepared {len(data_df)} bars for training {self.symbol} ({self.timeframe}).")
         return data_df
 
     async def run_training(self, tune_hyperparameters: bool = False):

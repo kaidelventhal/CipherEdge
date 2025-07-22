@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import warnings
 import multiprocessing
+from typing import Tuple, Dict, Optional
 
 # Suppress the specific pandas FutureWarning
 warnings.filterwarnings(
@@ -17,7 +18,10 @@ from kamikaze_komodo.app_logger import get_logger
 from kamikaze_komodo.config.settings import settings, PROJECT_ROOT
 from kamikaze_komodo.data_handling.data_handler import DataHandler
 from kamikaze_komodo.backtesting_engine.optimizer import StrategyOptimizer
+from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
+from kamikaze_komodo.backtesting_engine.performance_analyzer import PerformanceAnalyzer
 from kamikaze_komodo.portfolio_constructor.meta_portfolio_constructor import MultiStrategyPortfolioConstructor
+from kamikaze_komodo.portfolio_constructor.portfolio_manager import PortfolioManager
 from kamikaze_komodo.risk_control_module.risk_manager import RiskManager
 from kamikaze_komodo.ml_models.training_pipelines.lightgbm_pipeline import LightGBMTrainingPipeline
 from kamikaze_komodo.ml_models.training_pipelines.xgboost_classifier_pipeline import XGBoostClassifierTrainingPipeline
@@ -58,12 +62,9 @@ async def train_all_models_if_needed():
         }
         
         for model_name, (pipeline_class, model_filename) in models_to_check.items():
-            # Skip training if this model type is not required by the config
             if "KMeans" in model_name and not needs_regime_model:
-                logger.info(f"Skipping KMeans model check for {symbol} as it's not required by the current configuration.")
                 continue
             if ("LGBM" in model_name or "XGB" in model_name or "LSTM" in model_name) and not needs_ml_models:
-                logger.info(f"Skipping {model_name} model check for {symbol} as it's not required by the current configuration.")
                 continue
 
             model_path = os.path.join(PROJECT_ROOT, 'ml_models/trained_models', model_filename)
@@ -73,7 +74,6 @@ async def train_all_models_if_needed():
                     pipeline = pipeline_class(symbol=symbol, timeframe=timeframe)
                     await pipeline.run_training()
                     
-                    # FIX: Verify that the model file was actually created before logging success
                     if os.path.exists(model_path):
                         root_logger.info(f"Successfully trained and saved {model_name} model for {symbol}.")
                     else:
@@ -84,14 +84,14 @@ async def train_all_models_if_needed():
                 root_logger.info(f"Found existing {model_name} model for {symbol}.")
 
 
-async def run_phase3_discovery(data_handler: DataHandler):
+async def run_phase3_discovery(data_handler: DataHandler) -> Tuple[Optional[pd.DataFrame], Optional[Dict]]:
     """
     Executes the Phase 3 strategy discovery and portfolio construction process.
     """
     root_logger.info("🚀 Starting Kamikaze Komodo - Phase 3: Strategy Discovery & Portfolio Construction")
     if not settings:
         root_logger.critical("Settings failed to load.")
-        return
+        return pd.DataFrame(), None
 
     all_symbols = settings.PHASE3_SYMBOLS
     timeframe = settings.default_timeframe
@@ -113,7 +113,7 @@ async def run_phase3_discovery(data_handler: DataHandler):
 
     if not data_feeds:
         root_logger.critical("No data could be fetched for any symbol. Aborting Phase 3.")
-        return
+        return pd.DataFrame(), None
 
     optimizer = StrategyOptimizer(
         data_feeds=data_feeds, initial_capital=10000.0,
@@ -124,7 +124,8 @@ async def run_phase3_discovery(data_handler: DataHandler):
     
     if results_df.empty:
         root_logger.error("Strategy discovery yielded no results. Portfolio construction aborted.")
-        return
+        # ** FIX: Return empty objects instead of None to prevent crash **
+        return pd.DataFrame(), data_feeds
 
     risk_manager = RiskManager(settings=settings)
     portfolio_constructor = MultiStrategyPortfolioConstructor(settings=settings, risk_manager=risk_manager)
@@ -136,7 +137,7 @@ async def run_phase3_discovery(data_handler: DataHandler):
 
     if not selected_ids:
         root_logger.warning("No top combinations were selected after filtering. Portfolio construction aborted.")
-        return
+        return pd.DataFrame(), data_feeds
 
     weights = portfolio_constructor.compute_weights(
         selected_ids=selected_ids, equity_curves=equity_curves,
@@ -161,6 +162,49 @@ async def run_phase3_discovery(data_handler: DataHandler):
 
     root_logger.info(f"\n{top_combos_df[display_cols].to_string()}")
     root_logger.info("--- Phase 3 Discovery Complete ---")
+    return top_combos_df, data_feeds
+
+
+async def run_portfolio_backtest(data_handler: DataHandler):
+    """
+    Runs the full pipeline: discovery -> portfolio construction -> portfolio backtest.
+    """
+    root_logger.info("🚀🚀 Starting Kamikaze Komodo - Phase 4: Portfolio Backtest 🚀🚀")
+    
+    top_combos_df, data_feeds = await run_phase3_discovery(data_handler)
+    
+    if top_combos_df is None or top_combos_df.empty or data_feeds is None:
+        root_logger.error("Phase 3 did not yield any valid combinations. Aborting portfolio backtest.")
+        return
+        
+    strategy_configs = top_combos_df.reset_index().to_dict('records')
+
+    initial_capital = 10000.0
+    portfolio_manager = PortfolioManager(strategy_configs, initial_capital)
+    
+    portfolio_engine = BacktestingEngine(
+        initial_capital=initial_capital,
+        commission_bps=settings.commission_bps,
+        slippage_bps=settings.slippage_bps,
+        portfolio_manager=portfolio_manager,
+        portfolio_data_feeds=data_feeds
+    )
+    
+    _, final_portfolio, equity_curve = portfolio_engine.run()
+    
+    root_logger.info("--- Portfolio Backtest Performance Summary ---")
+    analyzer = PerformanceAnalyzer(
+        trades=[],
+        initial_capital=initial_capital,
+        final_capital=final_portfolio['final_portfolio_value'],
+        equity_curve_df=equity_curve
+    )
+    metrics = analyzer.calculate_metrics()
+    analyzer.print_summary(metrics)
+    
+    equity_curve.to_csv("portfolio_equity_curve.csv")
+    root_logger.info("Portfolio equity curve saved to 'portfolio_equity_curve.csv'.")
+    root_logger.info("--- Phase 4 Portfolio Backtest Complete ---")
 
 
 async def main():
@@ -168,11 +212,11 @@ async def main():
     if not settings:
         root_logger.critical("Settings failed to load. Application cannot start.")
         return
-     
+    
     data_handler = DataHandler()
     try:
         await train_all_models_if_needed()
-        await run_phase3_discovery(data_handler)
+        await run_portfolio_backtest(data_handler)
     finally:
         await data_handler.close()
         root_logger.info("Data handler connections closed.")
@@ -190,7 +234,7 @@ if __name__ == "__main__":
     try:
         if settings and settings.sentiment_llm_provider == "VertexAI" and not settings.vertex_ai_project_id:
             root_logger.warning("Vertex AI is selected, but Project ID is not set in config.ini. AI features may fail.")
-         
+        
         if not os.path.exists("logs"):
             os.makedirs("logs")
 

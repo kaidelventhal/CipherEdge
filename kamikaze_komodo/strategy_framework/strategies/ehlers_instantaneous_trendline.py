@@ -13,6 +13,14 @@ logger = get_logger(__name__)
 class EhlersInstantaneousTrendlineStrategy(BaseStrategy):
     """
     Implements Ehlers' Instantaneous Trendline strategy.
+    
+    NOTE ON PERFORMANCE: This is a very fast-reacting (low-lag) trend indicator.
+    While this is good for catching trends early, it makes the strategy extremely
+    sensitive and prone to "whipsaws" (numerous false signals) in sideways or
+    choppy markets. "Too good to be true" backtest results are often a sign of
+    overfitting to a specific historical period with smooth trends or, more commonly,
+    unrealistically low transaction cost (slippage/commission) assumptions.
+    Robustness testing, such as Walk-Forward Optimization, is crucial for this strategy.
     """
     def __init__(self, symbol: str, timeframe: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(symbol, timeframe, params)

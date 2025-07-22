@@ -9,7 +9,8 @@ from sklearn.preprocessing import LabelEncoder
 from kamikaze_komodo.ml_models.price_forecasting.base_forecaster import BasePriceForecaster
 from kamikaze_komodo.ml_models.feature_engineering import (
     add_lag_features, add_rolling_window_features, add_technical_indicators,
-    add_sentiment_features, add_cyclical_time_features
+    add_sentiment_features, add_cyclical_time_features,
+    add_advanced_indicators, add_market_structure_features
 )
 from kamikaze_komodo.app_logger import get_logger
 
@@ -45,7 +46,10 @@ class XGBoostClassifierForecaster(BasePriceForecaster):
         df = add_lag_features(df)
         df = add_rolling_window_features(df)
         df = add_technical_indicators(df)
-        df = add_sentiment_features(df)
+        df = add_advanced_indicators(df)
+        df = add_market_structure_features(df)
+        if 'sentiment_score' in df.columns:
+            df = add_sentiment_features(df)
         df = add_cyclical_time_features(df)
         df = df.replace([np.inf, -np.inf], np.nan)
         return df

@@ -30,10 +30,12 @@ class BollingerBandBreakoutStrategy(BaseStrategy):
         if df.empty or len(df) < self.bb_period:
             return pd.DataFrame()
 
-        # Bollinger Bands
+        # ** FIX START **: Calculate bands and then rename columns robustly
         bbands = ta.bbands(df['close'], length=self.bb_period, std=self.bb_std_dev)
-        df['bb_lower'] = bbands[f'BBL_{self.bb_period}_{self.bb_std_dev:.1f}']
-        df['bb_upper'] = bbands[f'BBU_{self.bb_period}_{self.bb_std_dev:.1f}']
+        if bbands is not None and not bbands.empty:
+            df['bb_lower'] = bbands.iloc[:, 0] # Lower band
+            df['bb_upper'] = bbands.iloc[:, 2] # Upper band
+        # ** FIX END **
         
         # ATR
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=self.atr_period)

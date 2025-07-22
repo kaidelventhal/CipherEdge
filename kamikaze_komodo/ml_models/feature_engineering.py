@@ -40,6 +40,55 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         logger.error(f"Error calculating technical indicators: {e}", exc_info=True)
     return df
 
+def add_advanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds more sophisticated technical indicators using pandas_ta."""
+    try:
+        import pandas_ta as ta
+        # Donchian Channels
+        df.ta.donchian(append=True)
+        # Ichimoku Cloud - returns multiple columns, we can keep the main ones
+        ichimoku_df = ta.ichimoku(df['high'], df['low'], df['close'])
+        if ichimoku_df is not None and isinstance(ichimoku_df, tuple) and len(ichimoku_df) > 0:
+            # The result is often a tuple of the dataframe and the span text
+            ichimoku_df = ichimoku_df[0] 
+            df[['ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26']] = ichimoku_df[['ISA_9', 'ISB_26', 'ITS_9', 'IKS_26', 'ICS_26']]
+        # Vortex Indicator
+        df.ta.vortex(append=True)
+        # On-Balance Volume (OBV)
+        df.ta.obv(append=True)
+        # Volume-Weighted Average Price (VWAP)
+        df.ta.vwap(append=True)
+    except ImportError:
+        logger.warning("pandas_ta not installed. Skipping advanced technical indicator features.")
+    except Exception as e:
+        logger.error(f"Error calculating advanced technical indicators: {e}", exc_info=True)
+    return df
+
+def add_market_structure_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds features that describe the market's recent structure and behavior."""
+    try:
+        import pandas_ta as ta
+        # Price vs. Moving Average
+        sma_50 = ta.sma(df['close'], length=50)
+        if sma_50 is not None and sma_50.gt(0).all():
+            df['price_vs_sma50'] = df['close'] / sma_50
+        
+        # High-Low Range as a Percentage of Close
+        df['high_low_range_pct'] = ((df['high'] - df['low']) / df['close']) * 100
+        
+        # Distance from Bollinger Bands
+        bbands = ta.bbands(df['close'], length=20, std=2.0)
+        if bbands is not None:
+            upper_band_col = f'BBU_{20}_{2.0}'
+            lower_band_col = f'BBL_{20}_{2.0}'
+            df['dist_from_upper_bb'] = df['close'] - bbands[upper_band_col]
+            df['dist_from_lower_bb'] = df['close'] - bbands[lower_band_col]
+    except ImportError:
+        logger.warning("pandas_ta not installed. Skipping market structure features.")
+    except Exception as e:
+        logger.error(f"Error calculating market structure features: {e}", exc_info=True)
+    return df
+
 def add_sentiment_features(df: pd.DataFrame) -> pd.DataFrame:
     """Adds features based on sentiment score."""
     if 'sentiment_score' in df.columns:

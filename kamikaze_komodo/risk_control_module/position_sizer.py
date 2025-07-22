@@ -1,10 +1,10 @@
 # FILE: kamikaze_komodo/risk_control_module/position_sizer.py
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, Type
 import numpy as np
-from kamikaze_komodo.core.models import BarData # For ATR based sizers potentially
+from kamikaze_komodo.core.models import BarData
 from kamikaze_komodo.app_logger import get_logger
-from kamikaze_komodo.core.enums import SignalType # Added for OptimalF and MLConfidence sizers
+from kamikaze_komodo.core.enums import SignalType
 logger = get_logger(__name__)
 
 class BasePositionSizer(ABC):
@@ -22,11 +22,11 @@ class BasePositionSizer(ABC):
         current_price: float,
         available_capital: float,
         current_portfolio_value: float, # Total equity
-        trade_signal: SignalType, # Added for OptimalF and MLConfidence sizers
-        strategy_info: Dict[str, Any], # Added for MLConfidence sizer (e.g. ML confidence)
-        latest_bar: Optional[BarData] = None, # For ATR or volatility based
-        atr_value: Optional[float] = None # Explicit ATR if available
-    ) -> Optional[float]: # Returns position size in asset units, or None if no trade
+        trade_signal: SignalType,
+        strategy_info: Dict[str, Any],
+        latest_bar: Optional[BarData] = None,
+        atr_value: Optional[float] = None
+    ) -> Optional[float]:
         """
         Calculates the size of the position to take.
         """
@@ -63,11 +63,10 @@ class FixedFractionalPositionSizer(BasePositionSizer):
         if trade_signal == SignalType.LONG and capital_to_allocate > available_capital :
             capital_to_allocate = available_capital
         
-        if capital_to_allocate <= 1.0: # Minimum capital to allocate (e.g. $1)
+        if capital_to_allocate <= 1.0:
             return None
 
         position_size = capital_to_allocate / current_price
-        # FIX: Change log level to DEBUG to reduce noise
         logger.debug(f"FixedFractional Sizing for {symbol}: Allocating ${capital_to_allocate:.2f}. Position Size: {position_size:.8f} units.")
         return position_size
 
@@ -117,21 +116,30 @@ class ATRBasedPositionSizer(BasePositionSizer):
             position_size = available_capital / current_price 
             if position_size <= 1e-8 : return None
 
-        # FIX: Change log level to DEBUG to reduce noise
         logger.debug(f"ATRBased Sizing for {symbol}: Risking ${capital_to_risk:.2f}. "
-                    f"ATR: {effective_atr:.6f}, StopDist: ${stop_distance_per_unit:.4f}. "
-                    f"Calculated Size: {position_size:.8f} units.")
+                     f"ATR: {effective_atr:.6f}, StopDist: ${stop_distance_per_unit:.4f}. "
+                     f"Calculated Size: {position_size:.8f} units.")
         return position_size
 
-class PairTradingPositionSizer(BasePositionSizer):
+class OptimalFPositionSizer(BasePositionSizer):
     """
-    Sizes positions for a pair trade, aiming for dollar neutrality.
+    Sizes positions based on a simplified Optimal f or fractional Kelly criterion.
     """
-    def __init__(self, dollar_neutral: bool = True, fraction_of_equity_for_pair: float = 0.1, params: Optional[Dict[str, Any]] = None):
+    def __init__(self, params: Optional[Dict[str, Any]] = None):
         super().__init__(params)
-        self.dollar_neutral = str(self.params.get('pairtradingpositionsizer_dollarneutral', dollar_neutral)).lower() == 'true'
-        self.fraction_of_equity_for_pair = float(self.params.get('fraction_of_equity_for_pair', fraction_of_equity_for_pair))
-        logger.info(f"PairTradingPositionSizer initialized. Dollar Neutral: {self.dollar_neutral}, Fraction for Pair: {self.fraction_of_equity_for_pair}")
+        self.default_win_rate = float(self.params.get('optimalf_win_rate_estimate', 0.51))
+        self.default_payoff_ratio = float(self.params.get('optimalf_avg_win_loss_ratio_estimate', 1.1))
+        self.kelly_fraction = float(self.params.get('optimalf_kelly_fraction', 0.5))
+
+        if self.default_payoff_ratio <= 0:
+            raise ValueError("Default average win/loss ratio estimate must be greater than zero.")
+        
+        logger.info(
+            f"OptimalFPositionSizer initialized. "
+            f"DefaultWinRate={self.default_win_rate}, "
+            f"DefaultAvgWinLossRatio={self.default_payoff_ratio}, "
+            f"KellyFraction={self.kelly_fraction}"
+        )
 
     def calculate_size(
         self,
@@ -142,34 +150,110 @@ class PairTradingPositionSizer(BasePositionSizer):
         trade_signal: SignalType,
         strategy_info: Dict[str, Any],
         latest_bar: Optional[BarData] = None,
-        atr_value: Optional[float] = None,
-        other_leg_price: Optional[float] = None,
-        hedge_ratio: Optional[float] = None
+        atr_value: Optional[float] = None
     ) -> Optional[float]:
+        if current_price <= 0 or current_portfolio_value <= 0:
+            return None
+
+        win_rate = strategy_info.get('win_rate', self.default_win_rate)
+        payoff_ratio = strategy_info.get('payoff_ratio', self.default_payoff_ratio)
+
+        if payoff_ratio <= 0:
+            logger.warning(f"Invalid payoff_ratio ({payoff_ratio}) for {symbol}. Cannot size position.")
+            return None
+
+        optimal_f = (win_rate * (payoff_ratio + 1) - 1) / payoff_ratio
         
-        if current_price <= 0 or current_portfolio_value <=0: return None
+        if optimal_f <= 0:
+            logger.debug(f"Optimal f for {symbol} is not positive ({optimal_f:.4f}). No position taken.")
+            return None
 
-        total_capital_for_pair_trade = current_portfolio_value * self.fraction_of_equity_for_pair
+        allocation_fraction = optimal_f * self.kelly_fraction
+        
+        capital_to_allocate = current_portfolio_value * allocation_fraction
+        
+        if trade_signal == SignalType.LONG and capital_to_allocate > available_capital:
+            capital_to_allocate = available_capital
 
-        if self.dollar_neutral:
-            capital_for_this_leg = total_capital_for_pair_trade / 2.0
-            
-            if total_capital_for_pair_trade > available_capital:
-                reduction_factor = available_capital / total_capital_for_pair_trade if total_capital_for_pair_trade > 0 else 0
-                capital_for_this_leg *= reduction_factor
+        position_size = capital_to_allocate / current_price
+        
+        log_source = "Dynamic" if 'win_rate' in strategy_info else "Default"
+        logger.info(
+            f"OptimalF Sizing ({log_source}) for {symbol}: WR={win_rate:.2f}, PR={payoff_ratio:.2f} -> "
+            f"Optimal_f={optimal_f:.4f}, Fraction={allocation_fraction:.4f}, "
+            f"Allocating ${capital_to_allocate:,.2f}. Position Size: {position_size:.8f} units."
+        )
+        return position_size if position_size > 0 else None
 
-            if capital_for_this_leg <= 1.0:
-                return None
-            
-            position_size = capital_for_this_leg / current_price
-            logger.debug(f"PairTrading Sizing (Dollar Neutral) for leg {symbol}: Capital for leg ${capital_for_this_leg:.2f}. Size: {position_size:.8f} units.")
-            return position_size
-        else:
-            if total_capital_for_pair_trade > available_capital:
-                total_capital_for_pair_trade = available_capital
+class MLConfidencePositionSizer(BasePositionSizer):
+    """
+    Sizes positions based on the confidence level of an ML prediction.
+    """
+    def __init__(self, params: Optional[Dict[str, Any]] = None):
+        super().__init__(params)
+        self.min_size_factor = float(self.params.get('mlconfidence_min_size_factor', 0.5))
+        self.max_size_factor = float(self.params.get('mlconfidence_max_size_factor', 1.5))
+        self.base_allocation_fraction = float(self.params.get('mlconfidence_base_allocation_fraction', 0.05))
 
-            if total_capital_for_pair_trade <= 1.0: return None
-            
-            position_size = total_capital_for_pair_trade / current_price
-            logger.warning(f"PairTrading Sizing (Non-Dollar Neutral) for leg {symbol} is simplified. Allocating ${total_capital_for_pair_trade:.2f}. Size: {position_size:.8f} units.")
-            return position_size
+        if not (0 <= self.min_size_factor <= self.max_size_factor):
+            raise ValueError("min_size_factor must be >= 0 and <= max_size_factor.")
+        if self.max_size_factor <= 0:
+            raise ValueError("max_size_factor must be positive.")
+
+        logger.info(
+            f"MLConfidencePositionSizer initialized. "
+            f"BaseAllocation={self.base_allocation_fraction*100:.2f}%, "
+            f"MinFactor={self.min_size_factor}, MaxFactor={self.max_size_factor}"
+        )
+
+    def calculate_size(
+        self,
+        symbol: str,
+        current_price: float,
+        available_capital: float,
+        current_portfolio_value: float,
+        trade_signal: SignalType,
+        strategy_info: Dict[str, Any],
+        latest_bar: Optional[BarData] = None,
+        atr_value: Optional[float] = None
+    ) -> Optional[float]:
+        if current_price <= 0 or current_portfolio_value <= 0:
+            return None
+
+        confidence_score = strategy_info.get('confidence_score')
+        if confidence_score is None:
+            logger.warning(f"ML 'confidence_score' missing for {symbol}. Cannot use MLConfidencePositionSizer. No trade.")
+            return None
+        
+        confidence_score = max(0.0, min(1.0, float(confidence_score)))
+        
+        effective_scaling_factor = self.min_size_factor + (self.max_size_factor - self.min_size_factor) * confidence_score
+        
+        base_capital_to_allocate = current_portfolio_value * self.base_allocation_fraction
+        capital_to_allocate = base_capital_to_allocate * effective_scaling_factor
+
+        if trade_signal == SignalType.LONG and capital_to_allocate > available_capital:
+            capital_to_allocate = available_capital
+
+        position_size = capital_to_allocate / current_price
+        
+        logger.info(
+            f"MLConfidence Sizing for {symbol}: Confidence={confidence_score:.4f}, "
+            f"ScalingFactor={effective_scaling_factor:.4f}. "
+            f"Allocating ${capital_to_allocate:,.2f}. Position Size: {position_size:.8f} units."
+        )
+        
+        return position_size if position_size > 0 else None
+
+class PairTradingPositionSizer(BasePositionSizer):
+    # ... (Implementation from previous file can be placed here if it exists) ...
+    pass
+
+# --- REGISTRY DEFINITION ---
+# Defined after all classes to ensure they are fully loaded.
+POSITION_SIZER_REGISTRY: Dict[str, Type[BasePositionSizer]] = {
+    'FixedFractionalPositionSizer': FixedFractionalPositionSizer,
+    'ATRBasedPositionSizer': ATRBasedPositionSizer,
+    'OptimalFPositionSizer': OptimalFPositionSizer,
+    'MLConfidencePositionSizer': MLConfidencePositionSizer,
+}

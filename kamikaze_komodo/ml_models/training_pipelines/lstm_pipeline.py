@@ -41,7 +41,7 @@ class LSTMTrainingPipeline:
         end_date = datetime.now(timezone.utc)
         data_df = await data_handler.get_prepared_data(
             self.symbol, self.timeframe, start_date, end_date,
-            needs_funding_rate=True, needs_sentiment=True
+            needs_funding_rate=True, needs_sentiment=settings.use_sentiment_in_models if settings else True
         )
         await data_handler.close()
         

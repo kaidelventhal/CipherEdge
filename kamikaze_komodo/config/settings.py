@@ -137,6 +137,7 @@ class Config:
 
         # --- Phase 4: AI News Analysis Settings ---
         self.enable_sentiment_analysis: bool = self.config.getboolean('AI_NewsAnalysis', 'EnableSentimentAnalysis', fallback=True)
+        self.use_sentiment_in_models: bool = self.config.getboolean('AI_NewsAnalysis', 'UseSentimentInModels', fallback=True)
         self.sentiment_llm_provider: str = self.config.get('AI_NewsAnalysis', 'SentimentLLMProvider', fallback='VertexAI')
         self.browser_agent_llm_provider: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMProvider', fallback='VertexAI')
         self.browser_agent_max_steps: int = self.config.getint('AI_NewsAnalysis', 'BrowserAgent_Max_Steps', fallback=20)
@@ -184,14 +185,18 @@ class Config:
 
         # --- Phase 3: Strategy Discovery & Portfolio Construction ---
         try:
-            self.PHASE3_SYMBOLS = json.loads(self.config.get('Phase3', 'PHASE3_SYMBOLS', fallback='[]'))
-            self.PHASE3_STRATEGIES = json.loads(self.config.get('Phase3', 'PHASE3_STRATEGIES', fallback='[]'))
-            self.PHASE3_RISK_MODULES = json.loads(self.config.get('Phase3', 'PHASE3_RISK_MODULES', fallback='[]'))
-            self.PHASE3_STOP_MANAGERS = json.loads(self.config.get('Phase3', 'PHASE3_STOP_MANAGERS', fallback='[]'))
-            self.PHASE3_TOP_COMBOS_COUNT = self.config.getint('Phase3', 'PHASE3_TOP_COMBOS_COUNT', fallback=5)
-            self.PHASE3_COMPUTE_WEIGHTS_METHOD = self.config.get('Phase3', 'PHASE3_COMPUTE_WEIGHTS_METHOD', fallback='risk_parity')
-            self.PHASE3_COMPOSITE_METHOD = self.config.get('Phase3', 'PHASE3_COMPOSITE_METHOD', fallback='weighted_vote')
-
+            # ** FIX START **
+            self.phase3_params = self.get_strategy_params('Phase3')
+            # ** FIX END **
+            
+            self.PHASE3_SYMBOLS = json.loads(self.phase3_params.get('phase3_symbols', '[]'))
+            self.PHASE3_STRATEGIES = json.loads(self.phase3_params.get('phase3_strategies', '[]'))
+            self.PHASE3_RISK_MODULES = json.loads(self.phase3_params.get('phase3_risk_modules', '[]'))
+            self.PHASE3_STOP_MANAGERS = json.loads(self.phase3_params.get('phase3_stop_managers', '[]'))
+            self.PHASE3_TOP_COMBOS_COUNT = int(self.phase3_params.get('phase3_top_combos_count', 5))
+            self.PHASE3_COMPUTE_WEIGHTS_METHOD = self.phase3_params.get('phase3_compute_weights_method', 'risk_parity')
+            self.PHASE3_COMPOSITE_METHOD = self.phase3_params.get('phase3_composite_method', 'weighted_vote')
+            
             # **NEW**: Parse the Grid Search parameters
             self.PHASE3_GRID_SEARCH = {}
             if self.config.has_section('Phase3_GridSearch'):
@@ -203,6 +208,7 @@ class Config:
             
         except (json.JSONDecodeError, configparser.NoSectionError) as e:
             logger.warning(f"Could not load Phase3 settings from config.ini: {e}. Using empty defaults.")
+            self.phase3_params = {}
             self.PHASE3_SYMBOLS = []
             self.PHASE3_STRATEGIES = []
             self.PHASE3_RISK_MODULES = []

@@ -48,6 +48,14 @@ class DatabaseManager:
                     PRIMARY KEY (timestamp, symbol, timeframe)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS funding_rates (
+                    timestamp TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    funding_rate REAL,
+                    PRIMARY KEY (timestamp, symbol)
+                )
+            """)
             self.conn.commit()
             logger.info("Core tables checked/created successfully.")
         except sqlite3.Error as e:
@@ -110,6 +118,47 @@ class DatabaseManager:
             ]
         except Exception as e:
             logger.error(f"Error retrieving bar data: {e}", exc_info=True)
+            return []
+
+    def store_funding_rates(self, funding_rate_list: List[Dict[str, Any]]):
+        if not self.conn or not funding_rate_list:
+            return
+        try:
+            cursor = self.conn.cursor()
+            data_to_insert = [
+                (
+                    self._to_iso_format(datetime.fromtimestamp(fr['timestamp'] / 1000, tz=timezone.utc)),
+                    fr['symbol'],
+                    fr['fundingRate']
+                ) for fr in funding_rate_list
+            ]
+            cursor.executemany("""
+                INSERT OR REPLACE INTO funding_rates (timestamp, symbol, funding_rate)
+                VALUES (?, ?, ?)
+            """, data_to_insert)
+            self.conn.commit()
+            logger.info(f"Stored/Replaced {len(data_to_insert)} funding rate entries.")
+        except Exception as e:
+            logger.error(f"Error storing funding rates: {e}", exc_info=True)
+
+    def retrieve_funding_rates(self, symbol: str, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+        if not self.conn: return []
+        try:
+            cursor = self.conn.cursor()
+            query = "SELECT * FROM funding_rates WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC"
+            params = (symbol, self._to_iso_format(start_date), self._to_iso_format(end_date))
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [
+                {
+                    "timestamp": self._from_iso_format(row['timestamp']).timestamp() * 1000,
+                    "symbol": row['symbol'],
+                    "fundingRate": row['funding_rate']
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error(f"Error retrieving funding rates: {e}", exc_info=True)
             return []
 
     def close(self):
