@@ -1,8 +1,8 @@
-# Kamikaze Komodo
+# CipherEdge
 
 ## Overview/Mission Statement
 
-Kamikaze Komodo is an AI-driven quantitative trading program designed to discover, backtest, and deploy a portfolio of diverse trading strategies. The system's primary mission is to achieve consistent profitability by dynamically adapting to changing market conditions through a robust, multi-strategy approach.
+CipherEdge is an AI-driven quantitative trading program designed to discover, backtest, and deploy a portfolio of diverse trading strategies. The system's primary mission is to achieve consistent profitability by dynamically adapting to changing market conditions through a robust, multi-strategy approach.
 
 ## Core Features & Architecture
 

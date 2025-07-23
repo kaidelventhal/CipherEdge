@@ -4,11 +4,11 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 
-from kamikaze_komodo.portfolio_constructor.portfolio_manager import PortfolioManager
-from kamikaze_komodo.backtesting_engine.engine import BacktestingEngine
-from kamikaze_komodo.core.models import BarData
-from kamikaze_komodo.core.enums import SignalType
-from kamikaze_komodo.config.settings import settings
+from cipher_edge.portfolio_constructor.portfolio_manager import PortfolioManager
+from cipher_edge.backtesting_engine.engine import BacktestingEngine
+from cipher_edge.core.models import BarData
+from cipher_edge.core.enums import SignalType
+from cipher_edge.config.settings import settings
 
 # --- Mock Components for predictable testing ---
 
@@ -35,7 +35,7 @@ class TestPortfolioManager(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Monkey-patch the real StrategyManager to use our mock strategies for this test."""
-        from kamikaze_komodo.strategy_framework import strategy_manager
+        from cipher_edge.strategy_framework import strategy_manager
         cls.original_create_strategy = strategy_manager.StrategyManager.create_strategy
         
         def mock_create_strategy(strategy_name, symbol, timeframe, params, **kwargs):
@@ -50,7 +50,7 @@ class TestPortfolioManager(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         """Restore the original StrategyManager after the test."""
-        from kamikaze_komodo.strategy_framework import strategy_manager
+        from cipher_edge.strategy_framework import strategy_manager
         strategy_manager.StrategyManager.create_strategy = cls.original_create_strategy
 
     def test_portfolio_backtest_execution(self):

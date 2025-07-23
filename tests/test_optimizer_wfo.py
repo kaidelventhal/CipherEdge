@@ -5,8 +5,8 @@ import numpy as np
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from kamikaze_komodo.backtesting_engine.optimizer import StrategyOptimizer
-from kamikaze_komodo.config.settings import settings
+from cipher_edge.backtesting_engine.optimizer import StrategyOptimizer
+from cipher_edge.config.settings import settings
 
 class TestWFOptimizer(unittest.TestCase):
 

@@ -4,8 +4,8 @@ __pycache__/
 *$py.class
 
 # Virtual Environments
-# If your venv is directly inside kamikaze_komodo package:
-kamikaze_komodo/.venv/
+# If your venv is directly inside cipher_edge package:
+cipher_edge/.venv/
 # If you might create other venvs at the root:
 .venv/
 venv/
@@ -14,17 +14,17 @@ env/
 .env
 
 # Database files
-kamikaze_komodo_data.db
+cipher_edge_data.db
 
 # Log files and directories
 logs/
 *.log
 # If logs are also generated inside the package dir (adjust if needed)
-kamikaze_komodo/logs/ 
+cipher_edge/logs/ 
 
 # Secrets / Sensitive Configuration
 # IMPORTANT: Make sure secrets.ini is NEVER committed
-#kamikaze_komodo/config/secrets.ini
+#cipher_edge/config/secrets.ini
 
 # IDE / Editor specific files
 .vscode/
@@ -81,5 +81,5 @@ coverage.xml
 # Temporary files
 *.swp
 *~
-
+tests/
 .venv
