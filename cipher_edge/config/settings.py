@@ -139,6 +139,10 @@ class Config:
         self.browser_agent_llm_provider: str = self.config.get('AI_NewsAnalysis', 'BrowserAgent_LLMProvider', fallback='VertexAI')
         self.browser_agent_max_steps: int = self.config.getint('AI_NewsAnalysis', 'BrowserAgent_Max_Steps', fallback=20)
 
+        self.enable_sentiment_analysis: bool = self.config.getboolean('AI_NewsAnalysis', 'EnableSentimentAnalysis', fallback=True)
+        self.notification_listener_enable: bool = self.config.getboolean('AI_NewsAnalysis', 'NotificationListener_Enable', fallback=False)
+
+        self.news_listener_check_interval: int = self.config.getint('AI_NewsAnalysis', 'NewsListener_Check_Interval_Seconds', fallback=300)
 
         self.sentiment_filter_threshold_long: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Long', fallback=0.1)
         self.sentiment_filter_threshold_short: float = self.config.getfloat('AI_NewsAnalysis', 'SentimentFilter_Threshold_Short', fallback=-0.1)

@@ -1,4 +1,3 @@
-# FILE: cipher_edge/ml_models/price_forecasting/xgboost_classifier_forecaster.py
 import xgboost as xgb
 import pandas as pd
 import numpy as np

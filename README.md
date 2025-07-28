@@ -1,51 +1,58 @@
-# CipherEdge
-
 ## Overview
 
-CipherEdge is an AI-driven quantitative trading program designed to automate and optimize cryptocurrency trading strategies. Our mission is to achieve consistent profitability by adapting to changing market conditions through a smart, multi-strategy approach. It's built for those who want to leverage advanced algorithms and AI for their trading.
+CipherEdge is an AI quantitative trading program I built for the cryptocurrency markets. It runs on Linux and is designed to automate trading strategies for crypto futures and options. The main goal is to use a multi-strategy and AI-based approach to adapt to changing market conditions.
 
-## What CipherEdge Does
+## Core Components
 
-CipherEdge focuses on a few key areas to give you an edge in the markets:
+### Trading Strategies
+The program can run and test several different trading strategies:
+- **EWMAC Strategy**: A classic trend-following strategy using Exponential Moving Average crossovers.
+- **Bollinger Band Mean Reversion**: A strategy that works best in ranging markets, selling at the top band and buying at the lower band.
+- **Bollinger Band Breakout**: A trend-following strategy that enters when price breaks out of the bands with high volume.
+- **Volatility Squeeze Breakout**: Enters trades when volatility expands after a period of low volatility (a "squeeze").
+- **Ehlers Instantaneous Trendline**: A low-lag trend-following strategy.
+- **Funding Rate Strategy**: A contrarian strategy that trades based on perpetual futures funding rates.
+- **ML Forecaster Strategy**: Uses the output of a machine learning model to decide when to buy or sell.
+- **Ensemble & Composite Strategies**: Meta-strategies that combine the signals from multiple other strategies to make a final decision.
 
-### Smarter Strategy Management
+### Risk Management
+Risk management is a top priority. I've implemented several layers of risk control.
 
-Instead of relying on just one trading idea, CipherEdge can manage multiple different strategies at once. It intelligently allocates capital between them and combines their signals to make unified trading decisions. This helps spread risk and capture more opportunities.
+**Position Sizing Models:**
+- **Fixed Fractional**: Risks a fixed percentage of the portfolio on each trade.
+- **ATR-Based Sizing**: Adjusts trade size based on market volatility (ATR), so each trade has a similar dollar risk.
+- **Optimal F (Kelly Criterion)**: Uses a strategy's past win rate and payoff ratio to calculate the optimal fraction of capital to allocate.
+- **ML Confidence Sizing**: Increases or decreases trade size based on the confidence score from an AI model's prediction.
 
-### AI-Powered Insights
+**Stop-Loss and Take-Profit Models:**
+- **ATR Stop-Loss**: A trailing stop that moves based on a multiple of the Average True Range (ATR).
+- **Parabolic SAR Stop**: A trailing stop that follows the Parabolic SAR indicator.
+- **Triple-Barrier Method**: Closes a trade based on one of three barriers: a profit target, a stop-loss, or a time limit.
+- **Percentage-Based**: A simple stop-loss or take-profit set at a fixed percentage from the entry price.
 
-We use AI to constantly look for new and better ways to trade. This involves:
+### Portfolio Construction
+The system can build a portfolio from the best-performing strategies found during optimization.
+- **Strategy Selection**: It uses metrics like the Deflated Sharpe Ratio to rank strategies and filters them based on their equity curve correlation to ensure diversification.
+- **Weighting Methods**: Once strategies are selected, it can assign capital using Equal Weighting or a Risk Parity approach (giving more capital to less volatile strategies).
 
-* **Strategy Discovery:** Our system uses AI to find optimal trading strategy settings across different assets and timeframes.
-* **Feature Engineering:** It generates rich data points for machine learning models, including advanced technical indicators, market structure details, and sentiment analysis.
-* **Forecasting:** We integrate machine learning models like LSTMs, GRUs, and Transformers for price prediction.
+## AI and Machine Learning
+The program uses AI for market analysis and trade signal generation.
 
-### Robust Backtesting
+- **Price Forecasting**: I have integrated models like LightGBM, XGBoost, and LSTMs (using PyTorch/TensorFlow) to predict future price movements.
+- **Market Regime Detection**: A K-Means clustering model is used to identify the current market environment (e.g., trending, ranging, or high volatility).
+- **AI News Analysis**: An asynchronous system (`NewsListener` and `NewsProcessor`) monitors RSS feeds, scrapes the full article text, and uses a local LLM (Ollama) with structured output to analyze the news for sentiment, key themes, and related crypto tickers.
+- **AI Research Agent**: A `BrowserAgent` uses LangChain tools to perform active research on a given crypto ticker, Browse websites to find the latest news that could impact its price.
 
-Before any strategy goes live, it's put through rigorous testing. Our backtesting engine:
+## Backtesting and Optimization
+All strategies are tested before use. The backtesting engine is custom-built and supports advanced features like Walk-Forward Optimization to avoid overfitting and ensure strategies are robust. It calculates a full suite of performance metrics, including the Sharpe Ratio and results from Monte Carlo simulations.
 
-* Simulates strategy performance on historical data, accounting for real-world factors like slippage and commissions.
-* Supports advanced validation techniques like "Walk-Forward Optimization" to ensure strategies are robust and not just lucky.
-* Provides comprehensive performance metrics, including the Deflated Sharpe Ratio and Monte Carlo simulations, to really understand how well a strategy might perform.
+## Technology Stack
+- **AI & ML**: PyTorch, TensorFlow, LightGBM, LangChain, Ollama
+- **Data**: Pandas, NumPy
+- **Exchange Connection**: CCXT
 
-### Advanced Risk Management
-
-Protecting your capital is a top priority. CipherEdge includes multiple layers of risk control:
-
-* **Smart Position Sizing:** We use various methods like Fixed Fractional, ATR-Based, and even AI confidence-based sizing to determine how much to trade.
-* **Dynamic Stop Management:** Our stop-loss methods are dynamic and adapt to market conditions (e.g., ATR-based, Parabolic SAR, Triple-Barrier methods), rather than fixed points.
-* **Portfolio-Level Control:** We manage overall portfolio risk with features like maximum drawdown limits and volatility targeting.
-
-### Live Trading Ready
-
-CipherEdge includes a fully asynchronous, event-driven engine for live trading. Whether you're paper trading to test or trading with real funds, it connects directly to exchange data feeds via WebSockets for fast and reliable operation.
-
-## Technologies Used
-
-CipherEdge is built with modularity in mind, making it easy to extend and maintain. We leverage powerful Python libraries for various tasks:
-
-* **AI & Machine Learning:** PyTorch, TensorFlow, LightGBM, XGBoost.
-* **Data Handling:** Pandas, NumPy.
-* **Trading & Exchange Interaction:** CCXT (for connecting to crypto exchanges).
-* **Backtesting:** Our own custom engine built upon robust principles.
-* **System Orchestration:** Asyncio for high-performance, real-time operations.
+## Future Steps
+- **Live Trading Deployment**: Connect the engine to an exchange API for live paper and real-money trading.
+- **Data Persistence**: Store the structured output from the AI news analysis in a database. This will allow new sentiment and theme data to be used as features in future backtests.
+- **Expand AI Agents**: Build more advanced AI agents that can perform more complex research tasks or even interact with smart contracts.
+- **Add Option Strategies**: Implement functionality for backtesting and trading options strategies.

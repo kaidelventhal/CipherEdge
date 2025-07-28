@@ -1,4 +1,3 @@
-# FILE: cipher_edge/ml_models/price_forecasting/lightgbm_forecaster.py
 import lightgbm as lgb
 import pandas as pd
 import numpy as np

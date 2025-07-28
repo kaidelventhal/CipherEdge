@@ -1,4 +1,3 @@
-# FILE: cipher_edge/ml_models/price_forecasting/base_forecaster.py
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Optional, Dict, Any, Union

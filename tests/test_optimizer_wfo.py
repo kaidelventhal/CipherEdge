@@ -1,4 +1,3 @@
-# FILE: tests/test_optimizer_wfo.py
 import unittest
 import pandas as pd
 import numpy as np
@@ -31,14 +30,14 @@ class TestWFOptimizer(unittest.TestCase):
 
         # Override config for a quick test run
         settings.PHASE3_SYMBOLS = ["PF_ETHUSD"]
-        settings.PHASE3_STRATEGIES = ["EhlersInstantaneousTrendlineStrategy"] # Test one simple strategy
+        settings.PHASE3_STRATEGIES = ["EhlersInstantaneousTrendlineStrategy"] 
         settings.PHASE3_RISK_MODULES = ["ATRBasedPositionSizer"]
         settings.PHASE3_STOP_MANAGERS = ["ParabolicSARStop"]
         
         # WFO settings for test
         settings.phase3_params['wfo_enabled'] = True
-        settings.phase3_params['wfo_num_windows'] = 4 # Fewer windows for faster test
-        settings.phase3_params['wfo_optuna_trials'] = 5 # Fewer optuna trials
+        settings.phase3_params['wfo_num_windows'] = 4 
+        settings.phase3_params['wfo_optuna_trials'] = 5 
 
         self.optimizer = StrategyOptimizer(
             data_feeds=self.data_feeds,
@@ -77,6 +76,4 @@ class TestWFOptimizer(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    # To run this test from your project root:
-    # python -m tests.test_optimizer_wfo
     unittest.main()

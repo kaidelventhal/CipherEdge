@@ -1,4 +1,3 @@
-# FILE: cipher_edge/main.py
 import asyncio
 import os
 import pandas as pd
@@ -7,12 +6,6 @@ import warnings
 import multiprocessing
 from typing import Tuple, Dict, Optional
 
-# Suppress the specific pandas FutureWarning
-warnings.filterwarnings(
-    "ignore",
-    message="Downcasting behavior in `replace` is deprecated and will be removed in a future version.",
-    category=FutureWarning
-)
 
 from cipher_edge.app_logger import get_logger
 from cipher_edge.config.settings import settings, PROJECT_ROOT
@@ -27,6 +20,12 @@ from cipher_edge.ml_models.training_pipelines.lightgbm_pipeline import LightGBMT
 from cipher_edge.ml_models.training_pipelines.xgboost_classifier_pipeline import XGBoostClassifierTrainingPipeline
 from cipher_edge.ml_models.training_pipelines.lstm_pipeline import LSTMTrainingPipeline
 from cipher_edge.ml_models.training_pipelines.kmeans_regime_pipeline import KMeansRegimeTrainingPipeline
+
+warnings.filterwarnings(
+    "ignore",
+    message="Downcasting behavior in `replace` is deprecated and will be removed in a future version.",
+    category=FutureWarning
+)
 
 
 root_logger = get_logger(__name__)
