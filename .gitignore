@@ -1,32 +1,20 @@
-# Python Bytecode and Caches
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual Environments
-# If your venv is directly inside cipher_edge package:
 cipher_edge/.venv/
-# If you might create other venvs at the root:
 .venv/
 venv/
 ENV/
 env/
 .env
-
-# Database files
+cipher_edge/config/secrets.ini
 cipher_edge_data.db
 
-# Log files and directories
 logs/
 *.log
-# If logs are also generated inside the package dir (adjust if needed)
 cipher_edge/logs/ 
 
-# Secrets / Sensitive Configuration
-# IMPORTANT: Make sure secrets.ini is NEVER committed
-#cipher_edge/config/secrets.ini
-
-# IDE / Editor specific files
 .vscode/
 .idea/
 *.project
@@ -38,7 +26,6 @@ cipher_edge/logs/
 *.sublime-workspace
 *.sublime-project
 
-# OS-generated files
 .DS_Store
 .DS_Store?
 ._*
@@ -47,7 +34,6 @@ cipher_edge/logs/
 ehthumbs.db
 Thumbs.db
 
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
@@ -67,10 +53,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# IPython Notebook checkpoints
 .ipynb_checkpoints
 
-# Coverage data
 .coverage
 .coverage.*
 htmlcov/
@@ -78,7 +62,6 @@ nosetests.xml
 coverage.xml
 *.cover
 
-# Temporary files
 *.swp
 *~
 tests/
